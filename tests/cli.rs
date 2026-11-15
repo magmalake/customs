@@ -72,6 +72,7 @@ fn a_clean_project_passes() {
 #[test]
 fn a_cycle_is_reported_with_its_imports() {
     let d = project(&[
+        ("src/p/__init__.mojo", ""),
         ("src/p/a.mojo", "from p.b import f\ndef g(): pass\n"),
         ("src/p/b.mojo", "def f():\n    from p.c import h\n"),
         ("src/p/c.mojo", "from p.a import g\ndef h(): pass\n"),
@@ -106,6 +107,7 @@ fn importing_a_package_init_from_inside_it_is_a_cycle() {
 #[test]
 fn a_reexport_is_reported_with_the_defining_module() {
     let d = project(&[
+        ("src/q/__init__.mojo", ""),
         ("src/q/defs.mojo", "struct Row: pass\ncomptime N = 1\n"),
         ("src/q/view.mojo", "from q.defs import Row, N\ndef show(): pass\n"),
         ("src/q/page.mojo", "from q.view import Row, show\nimport q.view as v\ndef f():\n    _ = v.N\n    v.show()\n"),
@@ -249,4 +251,19 @@ fn usage_errors_exit_2() {
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn only_files_in_packages_are_modules() {
+    let d = project(&[
+        ("pkg/__init__.mojo", "from pkg.a import f\n"),
+        ("pkg/a.mojo", "def f(): pass\n"),
+        ("pkg/loose/b.mojo", "def g(): pass\n"),
+        ("tests/helpers.mojo", "from tests.t import x\n"),
+        ("tests/t.mojo", "from tests.helpers import y\n"),
+        ("top.mojo", "from pkg.a import f\n"),
+    ]);
+    let r = run(&d, &[]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.err.contains("3 modules, 6 files"), "{}", r.err);
 }

@@ -3,8 +3,11 @@
 //! A project's modules are the `.mojo` files under its `src` (or under the
 //! project itself when it has no `src`), named by their path as Mojo names
 //! them with `-I src`: `src/a/b.mojo` is `a.b`, and `src/a/__init__.mojo`
-//! is the package `a`. Its other `.mojo` files (tests, examples, binaries)
-//! import modules but aren't modules others import. Directories given with
+//! is the package `a`. A file is a module only when each directory between
+//! the root and it is a package (has an `__init__.mojo`), as Mojo imports
+//! them: `tests/t.mojo` in a project without a `src` is no module. Its
+//! other `.mojo` files (tests, examples, binaries) import modules but
+//! aren't modules others import. Directories given with
 //! `-I` add modules of other projects, to look names up in: they're read,
 //! never reported on.
 
@@ -83,6 +86,14 @@ fn module_name(root: &Path, path: &Path) -> Option<(String, bool)> {
     }
     if parts.is_empty() {
         return None;
+    }
+    // Each directory from the root down to the file's must be a package.
+    let mut dir = root.to_path_buf();
+    for d in &parts[..parts.len() - usize::from(!is_pkg)] {
+        dir.push(d);
+        if !dir.join("__init__.mojo").is_file() {
+            return None;
+        }
     }
     Some((parts.join("."), is_pkg))
 }

@@ -34,8 +34,9 @@ customs [-I DIR]... [-v] [PROJECT]
 - **PROJECT** (default `.`): its modules are the `.mojo` files under
   `PROJECT/src` (or `PROJECT` without a `src`), named as `mojo build -I src`
   names them: `src/a/b.mojo` is `a.b`, `src/a/__init__.mojo` the package
-  `a`. Its other `.mojo` files (tests, examples, binaries) are checked as
-  importers. Hidden directories, `build`, `target` and `node_modules` are
+  `a`. A file is a module only inside packages, every directory above it
+  having an `__init__.mojo`, as Mojo imports them. Its other `.mojo` files
+  (tests, examples, binaries) are checked as importers. Hidden directories, `build`, `target` and `node_modules` are
   skipped.
 - **`-I DIR`**: modules of another project, as `mojo build -I DIR`. Names
   imported from them are checked; their own imports aren't reported.
@@ -46,6 +47,20 @@ customs [-I DIR]... [-v] [PROJECT]
 It exits 1 when it finds anything, and 2 on a usage or read error. Under
 GitHub Actions (`GITHUB_ACTIONS=true`) it also prints each finding as an
 `::error` annotation, so the lines show on a pull request.
+
+## In GitHub Actions
+
+```yaml
+  customs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ouromo/customs@v0.2.0
+```
+
+The action downloads the release of its own tag (or `version:`, or the
+latest when its ref isn't a version) for the runner's platform and runs it
+with `args:` (default `.`). Findings show as annotations on the pull request.
 
 ## How it reads Mojo
 

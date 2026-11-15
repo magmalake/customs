@@ -1,6 +1,6 @@
 [package]
 name = "customs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Checks a Mojo project's imports: no module cycles, and each name imported from the file that defines it."
