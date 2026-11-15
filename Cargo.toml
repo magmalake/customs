@@ -1,11 +1,11 @@
 [package]
 name = "customs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Checks a Mojo project's imports: no module cycles, and each name imported from the file that defines it."
 license = "Apache-2.0"
-repository = "https://github.com/ouromo/customs"
+repository = "https://github.com/magmalake/customs"
 publish = false
 
 [dependencies]
