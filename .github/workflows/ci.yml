@@ -17,3 +17,27 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # The action, over a clean project and one with a cycle (which must fail).
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir -p "$RUNNER_TEMP/clean/src/p" "$RUNNER_TEMP/cycle/src/p"
+          : > "$RUNNER_TEMP/clean/src/p/__init__.mojo"
+          printf 'def f(): pass\n' > "$RUNNER_TEMP/clean/src/p/a.mojo"
+          printf 'from p.a import f\n' > "$RUNNER_TEMP/clean/src/p/b.mojo"
+          : > "$RUNNER_TEMP/cycle/src/p/__init__.mojo"
+          printf 'from p.b import g\ndef f(): pass\n' > "$RUNNER_TEMP/cycle/src/p/a.mojo"
+          printf 'from p.a import f\ndef g(): pass\n' > "$RUNNER_TEMP/cycle/src/p/b.mojo"
+      - uses: ./
+        with:
+          args: ${{ runner.temp }}/clean
+      - id: cycle
+        uses: ./
+        continue-on-error: true
+        with:
+          args: ${{ runner.temp }}/cycle
+      - if: steps.cycle.outcome != 'failure'
+        run: echo "the cycle wasn't reported" && exit 1
