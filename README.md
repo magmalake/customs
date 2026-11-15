@@ -54,7 +54,7 @@ GitHub Actions (`GITHUB_ACTIONS=true`) it also prints each finding as an
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ouromo/customs@v0.2.0
+      - uses: magmalake/customs@v0.2.1
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -69,12 +69,12 @@ on each pull request, as a job their one required check waits for, as in
 
 ```yaml
   # Imports: no cycles between modules, and each name imported from the
-  # module that defines it (github.com/ouromo/customs).
+  # module that defines it (github.com/magmalake/customs).
   customs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ouromo/customs@v0.2.0
+      - uses: magmalake/customs@v0.2.1
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]

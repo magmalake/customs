@@ -10,8 +10,8 @@ inputs:
     default: "."
   version:
     description: >-
-      The release to run, as `v0.2.0`, or `latest`. By default the action's
-      own ref when that's a version tag (`ouromo/customs@v0.2.0`), else the
+      The release to run, as `v0.2.1`, or `latest`. By default the action's
+      own ref when that's a version tag (`magmalake/customs@v0.2.1`), else the
       latest release.
     default: ""
 
@@ -37,9 +37,9 @@ runs:
           *) echo "customs: no build for $(uname -s) $(uname -m)" >&2; exit 2 ;;
         esac
         if [ "$v" = latest ]; then
-          url="https://github.com/ouromo/customs/releases/latest/download/customs-$t.tar.gz"
+          url="https://github.com/magmalake/customs/releases/latest/download/customs-$t.tar.gz"
         else
-          url="https://github.com/ouromo/customs/releases/download/$v/customs-$t.tar.gz"
+          url="https://github.com/magmalake/customs/releases/download/$v/customs-$t.tar.gz"
         fi
         dir="$RUNNER_TEMP/customs-bin"
         mkdir -p "$dir"
