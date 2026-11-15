@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Checks a Mojo project's imports: no module cycles, and each name imported from the file that defines it."
+license = "Apache-2.0"
 repository = "https://github.com/ouromo/customs"
 publish = false
 

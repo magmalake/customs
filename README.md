@@ -66,3 +66,7 @@ cargo test
 It has no dependencies. The release builds Linux binaries for musl, which
 are static, and macOS ones, which link only the system's `libSystem`: each
 is one file to download and run.
+
+## License
+
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
