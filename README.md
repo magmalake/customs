@@ -36,8 +36,8 @@ customs [-I DIR]... [-v] [PROJECT]
   names them: `src/a/b.mojo` is `a.b`, `src/a/__init__.mojo` the package
   `a`. A file is a module only inside packages, every directory above it
   having an `__init__.mojo`, as Mojo imports them. Its other `.mojo` files
-  (tests, examples, binaries) are checked as importers. Hidden directories, `build`, `target` and `node_modules` are
-  skipped.
+  (tests, examples, binaries) are checked as importers. Hidden
+  directories, `build`, `target` and `node_modules` are skipped.
 - **`-I DIR`**: modules of another project, as `mojo build -I DIR`. Names
   imported from them are checked; their own imports aren't reported.
 - **`-v`**: also notes each name that isn't found at the top level of the
@@ -61,6 +61,48 @@ GitHub Actions (`GITHUB_ACTIONS=true`) it also prints each finding as an
 The action downloads the release of its own tag (or `version:`, or the
 latest when its ref isn't a version) for the runner's platform and runs it
 with `args:` (default `.`). Findings show as annotations on the pull request.
+
+## Example: magmalake
+
+The Mojo repos of [magmalake](https://github.com/magmalake) run customs
+on each pull request, as a job their one required check waits for, as in
+[zstd.mojo](https://github.com/magmalake/zstd.mojo/blob/main/.github/workflows/ci.yml):
+
+```yaml
+  # Imports: no cycles between modules, and each name imported from the
+  # module that defines it (github.com/ouromo/customs).
+  customs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ouromo/customs@v0.2.0
+
+  ci:
+    needs: [release, release-check, test, lint-bench, customs]
+```
+
+Adding it found two kinds of fixes. In
+[postgres.mojo](https://github.com/magmalake/postgres.mojo/pull/20), a cycle:
+
+```text
+src/postgres/connection.mojo:103: import cycle: postgres.connection -> postgres.copy -> postgres.connection
+    src/postgres/connection.mojo:103: from .copy import CopyIn
+    src/postgres/copy.mojo:60: from .connection import _ConnCell
+```
+
+`copy` needed the connection's shared cell and the helpers that raise
+errors on it, and `connection` needed `CopyIn`; the cell and helpers moved,
+unchanged, into a module below both. In
+[parquet.mojo](https://github.com/magmalake/parquet.mojo/pull/69), imports
+through a compatibility shim:
+
+```text
+tests/carrow_check.mojo:42: from parquet.arrow import bit_get: `bit_get` is defined in arrow_mlake.arrow, and parquet.arrow only re-exports it; import it from arrow_mlake.arrow
+```
+
+The shim exists for consumers, so it became a package
+(`parquet/arrow/__init__.mojo`), where a re-export is allowed, and the
+import path stayed the same.
 
 ## How it reads Mojo
 
