@@ -1,7 +1,6 @@
 # customs
 
-Checks a Mojo project's imports, the way customs checks what comes into a
-country. Two rules, fixed for now:
+Checks a Mojo project's imports. Two rules, fixed for now:
 
 1. **No import cycles.** A module imports only modules that don't import it
    back, directly or through others. Mojo compiles a cycle, so the
