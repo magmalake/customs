@@ -18,7 +18,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  # The action, over a clean project and one with a cycle (which must fail).
+  # The action, over a clean project, one with a cycle and one that runs
+  # `mojo run` per test file (which must fail), and that one set to warn.
   action:
     runs-on: ubuntu-latest
     steps:
@@ -31,6 +32,12 @@ jobs:
           : > "$RUNNER_TEMP/cycle/src/p/__init__.mojo"
           printf 'from p.b import g\ndef f(): pass\n' > "$RUNNER_TEMP/cycle/src/p/a.mojo"
           printf 'from p.a import f\ndef g(): pass\n' > "$RUNNER_TEMP/cycle/src/p/b.mojo"
+          for p in runs warn; do
+            mkdir -p "$RUNNER_TEMP/$p/tests"
+            for t in a b c d; do : > "$RUNNER_TEMP/$p/tests/test_$t.mojo"; done
+            printf '[tasks]\ntest = "for f in tests/test_*.mojo; do mojo run $f; done"\n' > "$RUNNER_TEMP/$p/pixi.toml"
+          done
+          printf '[tool.customs.lints]\nmojo-run-per-test = "warn"\n' >> "$RUNNER_TEMP/warn/pixi.toml"
       - uses: ./
         with:
           args: ${{ runner.temp }}/clean
@@ -41,3 +48,13 @@ jobs:
           args: ${{ runner.temp }}/cycle
       - if: steps.cycle.outcome != 'failure'
         run: echo "the cycle wasn't reported" && exit 1
+      - id: runs
+        uses: ./
+        continue-on-error: true
+        with:
+          args: ${{ runner.temp }}/runs
+      - if: steps.runs.outcome != 'failure'
+        run: echo "mojo run per test wasn't reported" && exit 1
+      - uses: ./
+        with:
+          args: ${{ runner.temp }}/warn

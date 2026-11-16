@@ -1,5 +1,5 @@
 name: customs
-description: "Checks a Mojo project's imports: no module cycles, and each name imported from the file that defines it."
+description: "Checks a Mojo project's imports (no module cycles, each name imported from the file that defines it) and how it runs its tests (built once, not `mojo run` per file)."
 branding:
   icon: check-circle
   color: green
@@ -10,8 +10,8 @@ inputs:
     default: "."
   version:
     description: >-
-      The release to run, as `v0.2.1`, or `latest`. By default the action's
-      own ref when that's a version tag (`magmalake/customs@v0.2.1`), else the
+      The release to run, as `v0.3.0`, or `latest`. By default the action's
+      own ref when that's a version tag (`magmalake/customs@v0.3.0`), else the
       latest release.
     default: ""
 

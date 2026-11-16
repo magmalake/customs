@@ -1,4 +1,4 @@
-//! The two rules.
+//! The rules on imports (`mojo-run-per-test` is in [`crate::runs`]).
 //!
 //! 1. **No import cycles.** A module imports only modules that don't import
 //!    it back, directly or through others. Every import counts, a nested
@@ -8,8 +8,14 @@
 //!    and `m.x` (after `import m`) name `x`'s own module, not one that only
 //!    imports it and passes it on; a package's `__init__.mojo` is the one
 //!    place a re-export is imported from.
+//! 3. **No import of a file that calls `__functions_in_module()`.** In Mojo
+//!    1.2.0 that list is incomplete in a module that is imported rather
+//!    than built as the main file, so a test file whose `main` discovers
+//!    its tests with it runs only some of them, or none, when another file
+//!    imports it and calls that `main`, and still passes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 
 use crate::lex::{Import, What};
 use crate::repo::{File, Repo};
@@ -346,4 +352,100 @@ pub fn reexports(repo: &Repo) -> (Vec<Finding>, Vec<Finding>) {
         }
     }
     (found.into_iter().collect(), notes.into_iter().collect())
+}
+
+fn canon(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The files `module` (absolute, as written) can be from `f`: the module
+/// of that name, and a file beside `f`, as Mojo finds one next to the file
+/// it builds.
+fn files_of(repo: &Repo, f: &File, module: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(m) = repo.get(module) {
+        out.push(m.path.clone());
+    }
+    if !module.starts_with('.') {
+        if let Some(dir) = f.path.parent() {
+            let rel: PathBuf = module.split('.').collect();
+            for p in [
+                dir.join(&rel).with_extension("mojo"),
+                dir.join(&rel).join("__init__.mojo"),
+            ] {
+                if p.is_file() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Rule 3: imports of a file that calls `__functions_in_module()`.
+pub fn functions_in_imported(repo: &Repo) -> Vec<Finding> {
+    let mut lists: HashMap<PathBuf, (usize, usize)> = HashMap::new();
+    for (i, f) in repo.files.iter().enumerate().filter(|(_, f)| f.local) {
+        if let Some(ln) = f
+            .text
+            .lines()
+            .position(|l| l.contains("__functions_in_module("))
+        {
+            lists.insert(canon(&f.path), (i, ln + 1));
+        }
+    }
+    let mut out = BTreeSet::new();
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    for f in repo.files.iter().filter(|f| f.local) {
+        let me = canon(&f.path);
+        for imp in &f.imports {
+            let Some(target) = repo.resolve(f, &imp.module) else {
+                continue;
+            };
+            let mut cands: Vec<(PathBuf, Option<&str>)> = Vec::new();
+            match &imp.what {
+                What::Names(names) => {
+                    for n in names {
+                        let sub = format!("{target}.{}", n.name);
+                        let subs = files_of(repo, f, &sub);
+                        if subs.is_empty() {
+                            cands.extend(
+                                files_of(repo, f, &target)
+                                    .into_iter()
+                                    .map(|p| (p, Some(n.name.as_str()))),
+                            );
+                        } else {
+                            cands.extend(subs.into_iter().map(|p| (p, Some(n.name.as_str()))));
+                        }
+                    }
+                }
+                What::Module(_) => {
+                    cands.extend(files_of(repo, f, &target).into_iter().map(|p| (p, None)))
+                }
+            }
+            let mut done = HashSet::new();
+            for (p, name) in cands {
+                let c = canon(&p);
+                if c == me || !done.insert(c.clone()) {
+                    continue;
+                }
+                let Some(&(fi, line)) = lists.get(&c) else {
+                    continue;
+                };
+                let lister = &repo.files[fi].display;
+                out.insert(Finding {
+                    file: f.display.clone(),
+                    line: imp.line,
+                    message: format!(
+                        "{}: {lister} calls __functions_in_module(), which lists only some of a module's functions when it's imported rather than built as the main file (Mojo 1.2.0), so tests found with it can be skipped and still pass; import its tests by name and don't run its main",
+                        import_text(imp, name)
+                    ),
+                    detail: vec![format!("{lister}:{line}: __functions_in_module()")],
+                });
+            }
+        }
+    }
+    out.into_iter().collect()
 }
