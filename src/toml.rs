@@ -51,14 +51,9 @@ impl P<'_> {
     }
 
     fn at(&self, lit: &str) -> bool {
-        let mut j = self.i;
-        for c in lit.chars() {
-            if self.s.get(j) != Some(&c) {
-                return false;
-            }
-            j += 1;
-        }
-        true
+        lit.chars()
+            .enumerate()
+            .all(|(k, c)| self.s.get(self.i + k) == Some(&c))
     }
 
     fn bump(&mut self) -> Option<char> {
