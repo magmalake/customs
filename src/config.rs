@@ -45,13 +45,15 @@ pub enum Rule {
     ImportThroughReexport,
     FunctionsInImportedModule,
     MojoRunPerTest,
+    MojoBuildPerTest,
 }
 
-pub const RULES: [Rule; 4] = [
+pub const RULES: [Rule; 5] = [
     Rule::ImportCycle,
     Rule::ImportThroughReexport,
     Rule::FunctionsInImportedModule,
     Rule::MojoRunPerTest,
+    Rule::MojoBuildPerTest,
 ];
 
 /// The groups, each with its rules; both are `deny` unless set.
@@ -59,7 +61,11 @@ pub const GROUPS: [(&str, &[Rule]); 2] = [
     ("imports", &[Rule::ImportCycle, Rule::ImportThroughReexport]),
     (
         "tests",
-        &[Rule::FunctionsInImportedModule, Rule::MojoRunPerTest],
+        &[
+            Rule::FunctionsInImportedModule,
+            Rule::MojoRunPerTest,
+            Rule::MojoBuildPerTest,
+        ],
     ),
 ];
 
@@ -70,6 +76,7 @@ impl Rule {
             Rule::ImportThroughReexport => "import-through-reexport",
             Rule::FunctionsInImportedModule => "functions-in-imported-module",
             Rule::MojoRunPerTest => "mojo-run-per-test",
+            Rule::MojoBuildPerTest => "mojo-build-per-test",
         }
     }
 
@@ -119,6 +126,8 @@ pub struct Config {
     cli: Levels,
     /// `mojo-run-per-test` reports a command that runs more files than this.
     pub threshold: usize,
+    /// `mojo-build-per-test` reports a command that builds more than this.
+    pub build_threshold: usize,
 }
 
 impl Default for Config {
@@ -127,6 +136,7 @@ impl Default for Config {
             file: Levels::default(),
             cli: Levels::default(),
             threshold: DEFAULT_THRESHOLD,
+            build_threshold: DEFAULT_THRESHOLD,
         }
     }
 }
@@ -179,12 +189,20 @@ impl Config {
                         level(k, v, e.line, &mut c)?;
                     }
                 }
-                [opt] if opt == "mojo-run-per-test-threshold" => {
-                    c.threshold = match &e.value {
+                [opt]
+                    if opt == "mojo-run-per-test-threshold"
+                        || opt == "mojo-build-per-test-threshold" =>
+                {
+                    let n = match &e.value {
                         Value::Other(n) => n.parse().ok(),
                         _ => None,
                     }
                     .ok_or_else(|| bad(e.line, format!("`{opt}` is a whole number")))?;
+                    if opt == "mojo-run-per-test-threshold" {
+                        c.threshold = n;
+                    } else {
+                        c.build_threshold = n;
+                    }
                 }
                 _ => return Err(bad(e.line, format!("no option `{}`", rest.join(".")))),
             }

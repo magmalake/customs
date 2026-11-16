@@ -275,10 +275,13 @@ fn tests_project(pixi: &str) -> PathBuf {
         ("pixi.toml", pixi),
         ("src/p/__init__.mojo", ""),
         ("src/p/a.mojo", "def f(): pass\n"),
-        ("tests/test_a.mojo", "from p.a import f\n"),
-        ("tests/test_b.mojo", ""),
-        ("tests/test_c.mojo", ""),
-        ("tests/test_d.mojo", ""),
+        (
+            "tests/test_a.mojo",
+            "from p.a import f\ndef test_x(): pass\n",
+        ),
+        ("tests/test_b.mojo", "def test_x(): pass\n"),
+        ("tests/test_c.mojo", "def test_x(): pass\n"),
+        ("tests/test_d.mojo", "def test_x(): pass\n"),
     ])
 }
 
@@ -288,7 +291,7 @@ fn mojo_run_per_test_in_a_task() {
     let r = run(&d, &[]);
     assert_eq!(r.code, 1, "{}{}", r.out, r.err);
     assert!(
-        r.out.contains("pixi.toml:3: task `test` runs `mojo run` on 4 .mojo files, more than 3: each compiles the code they share again; build them once, into one binary [mojo-run-per-test]"),
+        r.out.contains("pixi.toml:3: task `test` runs `mojo run` on 4 test files, more than 3: each compiles the code they share again; build them once, into one binary [mojo-run-per-test]"),
         "{}",
         r.out
     );
@@ -368,11 +371,11 @@ fn depends_on_scripts_loops_and_workflows() {
             ".github/workflows/ci.yml",
             "jobs:\n  t:\n    steps:\n      - run: pixi run script\n      - name: each\n        run: |\n          for t in a b c d e; do\n            pixi run mojo run tests/test_$t.mojo\n          done\n      - run: mojo run ${{ matrix.test }}\n",
         ),
-        ("tests/test_a.mojo", ""),
-        ("tests/test_b.mojo", ""),
-        ("tests/test_c.mojo", ""),
-        ("tests/test_d.mojo", ""),
-        ("tests/test_e.mojo", ""),
+        ("tests/test_a.mojo", "def test_x(): pass\n"),
+        ("tests/test_b.mojo", "def test_x(): pass\n"),
+        ("tests/test_c.mojo", "def test_x(): pass\n"),
+        ("tests/test_d.mojo", "def test_x(): pass\n"),
+        ("tests/test_e.mojo", "def test_x(): pass\n"),
         ("examples/one.mojo", ""),
     ]);
     let r = run(&d, &["-v"]);
@@ -381,19 +384,19 @@ fn depends_on_scripts_loops_and_workflows() {
     // and not the step that runs it; the step's own loop, five.
     assert!(
         r.out
-            .contains("pixi.toml:5: task `all` runs `mojo run` on 4 .mojo files"),
+            .contains("pixi.toml:5: task `all` runs `mojo run` on 4 test files"),
         "{}",
         r.out
     );
     assert!(
         r.out
-            .contains("scripts/t.sh:5: this script runs `mojo run` on 5 .mojo files"),
+            .contains("scripts/t.sh:5: this script runs `mojo run` on 5 test files"),
         "{}",
         r.out
     );
     assert!(
         r.out
-            .contains(".github/workflows/ci.yml:6: this step runs `mojo run` on 5 .mojo files"),
+            .contains(".github/workflows/ci.yml:6: this step runs `mojo run` on 5 test files"),
         "{}",
         r.out
     );
@@ -421,10 +424,10 @@ fn what_it_cant_tell_is_never_a_finding() {
             "pixi.toml",
             "[tasks]\nt = \"for f in $(find tests -name '*.mojo'); do mojo run $f; done\"\nu = \"ls tests/*.mojo | xargs -n1 mojo run\"\nv = { cmd = \"mojo run {{ file }}\", args = [\"file\"] }\nw = \"mojo run examples/a.mojo && mojo run examples/b.mojo && mojo run examples/c.mojo && mojo run examples/d.mojo\"\nx = \"mojo build tests/test_a.mojo && mojo format tests\"\n",
         ),
-        ("tests/test_a.mojo", ""),
-        ("tests/test_b.mojo", ""),
-        ("tests/test_c.mojo", ""),
-        ("tests/test_d.mojo", ""),
+        ("tests/test_a.mojo", "def test_x(): pass\n"),
+        ("tests/test_b.mojo", "def test_x(): pass\n"),
+        ("tests/test_c.mojo", "def test_x(): pass\n"),
+        ("tests/test_d.mojo", "def test_x(): pass\n"),
         ("examples/a.mojo", ""),
     ]);
     let r = run(&d, &["-v"]);
@@ -505,4 +508,118 @@ fn a_module_that_calls_functions_in_module_imported_by_name() {
         "{}",
         r.out
     );
+}
+
+#[test]
+fn mojo_build_per_test_through_a_wrapper_script_and_a_function() {
+    let d = project(&[
+        (
+            "pixi.toml",
+            "[tasks]\none = \"scripts/mojo-build.sh -I src $DEP_INC tests/test_a.mojo -o build/a && ./build/a\"\ntwo = { cmd = \"scripts/mojo-build.sh -I src ${DEP_INC:--I src} tests/test_b.mojo -o build/b\" }\nthree = \"sh scripts/more.sh\"\ntest = { depends-on = [\"one\", \"two\", \"three\"] }\nprograms = \"for p in pipelines/*.mojo; do scripts/mojo-build.sh -I src $p -o build/x; done\"\n",
+        ),
+        (
+            "scripts/mojo-build.sh",
+            "#!/bin/sh\nif command -v ouromo > /dev/null; then\n    compile() { ouromo build --split-cache-dir \"${D:-build/.split}\" \"$@\"; }\nelse\n    compile() { mojo build \"$@\"; }\nfi\ncompile \"$@\"\n",
+        ),
+        (
+            "scripts/more.sh",
+            "#!/bin/sh\nbuild() {\n    mojo build -I src \"$1\" -o build/t\n}\nbuild tests/test_c.mojo\nbuild tests/test_d.mojo\n# A driver and a program that must not compile: no tests in them.\nscripts/mojo-build.sh -I src tests/driver.mojo -o build/driver\nmojo build tests/compile_fail/bad.mojo -o build/bad || true\n",
+        ),
+        ("tests/test_a.mojo", "def test_x(): pass\n"),
+        ("tests/test_b.mojo", "def test_x(): pass\n"),
+        ("tests/test_c.mojo", "def test_x(): pass\n"),
+        ("tests/test_d.mojo", "def test_x(): pass\n"),
+        ("tests/driver.mojo", "def main(): pass\n"),
+        ("tests/compile_fail/bad.mojo", "def main(): x\n"),
+        ("pipelines/a.mojo", "def main(): pass\n"),
+        ("pipelines/b.mojo", "def main(): pass\n"),
+        ("pipelines/c.mojo", "def main(): pass\n"),
+        ("pipelines/d.mojo", "def main(): pass\n"),
+    ]);
+    let r = run(&d, &["-v"]);
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(
+        r.out.contains("pixi.toml:5: task `test` runs `mojo build` on 4 test files, more than 3: each build compiles the code they share again; build them once, into one binary [mojo-build-per-test]"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("    pixi.toml:2: mojo build tests/test_a.mojo"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("    scripts/more.sh:3: mojo build tests/test_c.mojo"),
+        "{}",
+        r.out
+    );
+    assert_eq!(
+        r.out.matches("[mojo-build-per-test]").count(),
+        1,
+        "{}",
+        r.out
+    );
+    assert!(!r.out.contains("note: mojo-build-per-test"), "{}", r.out);
+    assert!(
+        r.err
+            .contains("1 command that runs `mojo build` on more than 3 files"),
+        "{}",
+        r.err
+    );
+    // Its own threshold and level.
+    let d2 = d.join("pixi.toml");
+    let src = fs::read_to_string(&d2).unwrap();
+    fs::write(
+        &d2,
+        format!("{src}[tool.customs]\nmojo-build-per-test-threshold = 4\n"),
+    )
+    .unwrap();
+    assert_eq!(run(&d, &[]).code, 0);
+    fs::write(
+        &d2,
+        format!("{src}[tool.customs.lints]\nmojo-build-per-test = \"warn\"\n"),
+    )
+    .unwrap();
+    let r = run(&d, &[]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.out
+            .contains("pixi.toml:5: warning: task `test` runs `mojo build`"),
+        "{}",
+        r.out
+    );
+    assert_eq!(run(&d, &["-D", "tests"]).code, 1);
+}
+
+#[test]
+fn a_unit_over_by_itself_beside_one_already_reported() {
+    // `all` runs `many` (reported) and four more of its own: both reported,
+    // `all` for its own four; `wrap` adds nothing and isn't.
+    let d = project(&[
+        (
+            "pixi.toml",
+            "[tasks]\nmany = \"for f in tests/test_*.mojo; do mojo build $f -o build/x; done\"\nall = { cmd = \"mojo build t/test_1.mojo && mojo build t/test_2.mojo && mojo build t/test_3.mojo && mojo build t/test_4.mojo\", depends-on = [\"many\"] }\nwrap = { depends-on = [\"all\"] }\n",
+        ),
+        ("tests/test_a.mojo", "def test_x(): pass\n"),
+        ("tests/test_b.mojo", "def test_x(): pass\n"),
+        ("tests/test_c.mojo", "def test_x(): pass\n"),
+        ("tests/test_d.mojo", "def test_x(): pass\n"),
+    ]);
+    let r = run(&d, &[]);
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(
+        r.out
+            .contains("pixi.toml:2: task `many` runs `mojo build` on 4 test files"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("pixi.toml:3: task `all` runs `mojo build` on 4 test files"),
+        "{}",
+        r.out
+    );
+    assert!(!r.out.contains("task `wrap`"), "{}", r.out);
 }

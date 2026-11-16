@@ -1,6 +1,6 @@
 # customs
 
-Checks a Mojo project's imports, and how it runs its tests. Four rules, in
+Checks a Mojo project's imports, and how it builds its tests. Five rules, in
 two groups:
 
 **`imports`**
@@ -39,6 +39,14 @@ two groups:
    names the task, CI step or script, and the files it runs. See
    [How it reads tasks, workflows and scripts](#how-it-reads-tasks-workflows-and-scripts)
    for what it sees.
+5. **`mojo-build-per-test`: no command runs `mojo build` on more than 3
+   test files.** Building each test file into a binary of its own costs what
+   `mojo run` per file does (663 s against 665 s in census). It counts
+   `mojo build` itself and a wrapper that passes its arguments on to it: a
+   shell function (`compile() { mojo build "$@"; }`) or a script
+   (`scripts/mojo-build.sh -I src tests/test_x.mojo -o build/test-x`).
+   Building several programs (pipelines, a CLI, a test's driver) isn't a
+   finding: only test files count. Since 0.3.1.
 
 Every rule is `deny` unless [configured](#configuration): without a
 configuration, `imports` behaves as it did before the `tests` group.
@@ -50,7 +58,7 @@ src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -
     src/morca/_internal/web/page.mojo:8: from morca._internal.ui.layout import with_header_help
 src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows [import-through-reexport]
 ...
-customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files
+customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files
 ```
 
 ## Usage
@@ -89,10 +97,11 @@ group, and each rule's numbers as flat kebab-case keys named after it.
 ```toml
 [tool.customs]
 mojo-run-per-test-threshold = 3     # report a command that runs more test files
+mojo-build-per-test-threshold = 3   # report a command that builds more test files
 
 [tool.customs.lints]
 imports = "deny"                    # group: import-cycle, import-through-reexport
-tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test
+tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test, mojo-build-per-test
 # The examples' tests are separate programs: they can't share a binary.
 mojo-run-per-test = "warn"          # a rule's own level wins over its group's
 ```
@@ -113,7 +122,7 @@ mojo-run-per-test = "warn"          # a rule's own level wins over its group's
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.3.0
+      - uses: magmalake/customs@v0.3.1
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -133,7 +142,7 @@ on each pull request, as a job their one required check waits for, as in
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.3.0
+      - uses: magmalake/customs@v0.3.1
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]
@@ -179,7 +188,8 @@ or a string doesn't count.
 
 ## How it reads tasks, workflows and scripts
 
-`mojo-run-per-test` is a scanner too. It reads, at PROJECT:
+`mojo-run-per-test` and `mojo-build-per-test` are a scanner too. They
+read, at PROJECT:
 
 - the tasks of `pixi.toml`: `[tasks]`, `[feature.*.tasks]` and their
   `target.*` forms, as strings, `{ cmd = …, depends-on = … }` tables or
@@ -194,16 +204,24 @@ here-documents dropped, and a `mojo run X.mojo`, or `mojo X.mojo` (the
 same), counts `X.mojo`. Inside `for f in WORDS; do … done`, `mojo run "$f"`
 (or `tests/test_$f.mojo`) counts each word, a glob (`tests/test_*.mojo`)
 counting each file it matches, as does `$(ls GLOB)`; so do variables set
-to such words. Only test files are counted: under a directory `test` or
-`tests`, or named `test_*`. A task, step or script is reported when it runs
-more than the threshold, and none of what it runs is over by itself: the
-one place to change. `mojo build` and the binary it makes aren't counted.
+to such words. `mojo build X.mojo` (and `ouromo build`) counts the same way
+for `mojo-build-per-test`, and so does a call to a shell function or a
+script that passes its arguments on to `mojo build` (`"$@"`): the call's
+arguments are what is built, and a function's `$1`... are its arguments.
+
+Only test files are counted: under a directory `test` or `tests`, or named
+`test_*`, and, when the file exists, with a `def test_` at its top level.
+A program under `tests/` (a driver a shell test starts, a file that must
+fail to compile) isn't one. A task, step or script is reported when what
+it runs, leaving out the files of what it runs that is reported already,
+is more than the threshold: the place to change.
 
 Where it can't tell, it doesn't report. A `mojo run` whose file it can't
 work out (a variable it doesn't know, a matrix value `${{ … }}`, a task
 argument `{{ … }}`, `xargs`, `while read`, `find`) is a note with `-v`, not
-a count. It doesn't follow shell functions, `cd`, `make` or `just`, scripts
-named by a variable, a task's `cwd`, nor `pyproject.toml`'s `[tool.pixi]`.
+a count; so is a `mojo build`. It doesn't follow `cd`, `make` or `just`,
+scripts named by a variable, a script's own arguments (only a function's),
+a task's `cwd`, nor `pyproject.toml`'s `[tool.pixi]`.
 `echo` and `printf` lines are skipped, so a `mojo run` in a message isn't
 counted.
 

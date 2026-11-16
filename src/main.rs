@@ -21,7 +21,9 @@ Checks the Mojo project at PROJECT (default: .). Its rules, by group:
     functions-in-imported-module  no import of a file that calls
                                   __functions_in_module()
     mojo-run-per-test             no task, CI step or script that runs
-                                  `mojo run` on more than 3 .mojo files
+                                  `mojo run` on more than 3 test files
+    mojo-build-per-test           no task, CI step or script that runs
+                                  `mojo build` on more than 3 test files
 
 Its modules are the .mojo files under PROJECT/src (or PROJECT, without a
 src); its other .mojo files (tests, examples, ...) are checked as importers.
@@ -176,6 +178,18 @@ fn main() -> ExitCode {
     let github = env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
     let on = |r: Rule| config.level(r) != Level::Allow;
     let mut results: Vec<(Rule, Vec<Finding>, Vec<Finding>)> = Vec::new();
+    let scan = (on(Rule::MojoRunPerTest) || on(Rule::MojoBuildPerTest)).then(|| {
+        runs::check(
+            &args.project,
+            &|p| repo::display(p),
+            config.threshold,
+            config.build_threshold,
+        )
+    });
+    let (mut run_found, mut build_found) = match scan {
+        Some((r, b)) => (Some(r), Some(b)),
+        None => (None, None),
+    };
     for rule in RULES {
         if !on(rule) {
             continue;
@@ -185,7 +199,12 @@ fn main() -> ExitCode {
             Rule::ImportThroughReexport => check::reexports(&repo),
             Rule::FunctionsInImportedModule => (check::functions_in_imported(&repo), Vec::new()),
             Rule::MojoRunPerTest => {
-                runs::check(&args.project, &|p| repo::display(p), config.threshold)
+                let f = run_found.take().expect("scanned");
+                (f.findings, f.notes)
+            }
+            Rule::MojoBuildPerTest => {
+                let f = build_found.take().expect("scanned");
+                (f.findings, f.notes)
             }
         };
         results.push((rule, found, notes));
@@ -235,6 +254,15 @@ fn main() -> ExitCode {
                         "commands that run `mojo run` on"
                     ),
                     config.threshold
+                ),
+                Rule::MojoBuildPerTest => format!(
+                    "{} more than {} files",
+                    plural(
+                        n,
+                        "command that runs `mojo build` on",
+                        "commands that run `mojo build` on"
+                    ),
+                    config.build_threshold
                 ),
             };
             if config.level(*rule) == Level::Warn && n > 0 {

@@ -10,8 +10,8 @@ inputs:
     default: "."
   version:
     description: >-
-      The release to run, as `v0.3.0`, or `latest`. By default the action's
-      own ref when that's a version tag (`magmalake/customs@v0.3.0`), else the
+      The release to run, as `v0.3.1`, or `latest`. By default the action's
+      own ref when that's a version tag (`magmalake/customs@v0.3.1`), else the
       latest release.
     default: ""
 
