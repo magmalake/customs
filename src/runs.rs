@@ -1,5 +1,6 @@
-//! `mojo-run-per-test`: a command that runs `mojo run` on many `.mojo`
-//! files compiles the code those files share once per file.
+//! `mojo-run-per-test` and `mojo-build-per-test`: a command that runs
+//! `mojo run`, or `mojo build`, on many test files compiles the code those
+//! files share once per file.
 //!
 //! What it reads, at the project's root:
 //!
@@ -10,13 +11,16 @@
 //!   `pixi run TASK`), and the scripts those run in turn.
 //!
 //! In each it finds `mojo run X.mojo`, and `mojo X.mojo`, which is the
-//! same, as the words of simple commands ([`crate::shell`]): `mojo run
-//! "$f"` inside `for f in tests/*.mojo` counts each file the glob matches.
-//! A `mojo run` whose file it can't tell (a variable it doesn't know, a
-//! matrix value, `xargs`) is a note, not a count. Each task, step or script
-//! is counted with everything it runs, and it's reported when that's more
-//! than the threshold and none of what it runs is itself over: the one
-//! place to change.
+//! same, and `mojo build X.mojo`, as the words of simple commands
+//! ([`crate::shell`]): `mojo run "$f"` inside `for f in tests/*.mojo`
+//! counts each file the glob matches. A shell function or a script that
+//! passes its arguments on to `mojo build` (`compile() { mojo build "$@"; }`,
+//! `scripts/mojo-build.sh`) is a `mojo build` where it's called. A file run
+//! or built that it can't tell (a variable it doesn't know, a matrix value,
+//! `xargs`) is a note, not a count. Only test files count ([`Scan::is_test`]).
+//! Each task, step or script is counted with everything it runs; it's
+//! reported when, leaving out the files of what it runs that is reported
+//! already, that's more than the threshold: the place to change.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -34,14 +38,32 @@ struct Task {
     deps: Vec<String>,
 }
 
+/// `mojo run` or `mojo build`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Run,
+    Build,
+}
+
+impl Kind {
+    fn verb(self) -> &'static str {
+        match self {
+            Kind::Run => "mojo run",
+            Kind::Build => "mojo build",
+        }
+    }
+}
+
 struct Unit {
     /// `task \`test\``, `this step`, `this script`.
     label: String,
     file: String,
     line: usize,
-    /// Each `.mojo` file run, with where: `file:line`, and the line.
-    runs: Vec<(String, String, usize)>,
+    /// Each test file run or built, with where (`file:line`) and the line.
+    runs: Vec<(Kind, String, String, usize)>,
     calls: Vec<usize>,
+    /// A script that passes its arguments on to `mojo build`.
+    forwards: bool,
 }
 
 /// Where a piece of shell text is.
@@ -65,7 +87,13 @@ struct Scan<'a> {
     task_units: Vec<usize>,
     units: Vec<Unit>,
     scripts: HashMap<String, usize>,
-    notes: BTreeSet<Finding>,
+    notes: BTreeSet<(Kind, Finding)>,
+    /// Set by a `mojo build "$@"` in the text being read.
+    forwarded: bool,
+    /// How deep in shell functions.
+    depth: usize,
+    /// Whether a file has a `def test_` at its top level, by path.
+    has_tests: HashMap<String, bool>,
 }
 
 const SUBCOMMANDS: [&str; 12] = [
@@ -84,10 +112,11 @@ const SUBCOMMANDS: [&str; 12] = [
 ];
 
 /// `mojo` options that take a value.
-const VALUE_OPTS: [&str; 9] = [
+const VALUE_OPTS: [&str; 10] = [
     "-I",
     "-D",
     "-o",
+    "--split-cache-dir",
     "--sanitize",
     "--target-triple",
     "--target-cpu",
@@ -167,19 +196,38 @@ fn looks(s: &str) -> bool {
     s.ends_with(".mojo") || s.ends_with(".🔥")
 }
 
-/// `$X` or `${X}`, and nothing else.
-fn lone_var(s: &str) -> bool {
-    let name = s
-        .strip_prefix("${")
-        .and_then(|r| r.strip_suffix('}'))
-        .or_else(|| s.strip_prefix('$'));
-    name.is_some_and(is_ident)
+/// A word among `args`, not an option or an option's value, that could be
+/// the source file: a `.mojo` path or a variable.
+fn later_source(args: &[Word]) -> bool {
+    let mut k = 0;
+    while k < args.len() {
+        let a = args[k].text.as_str();
+        if VALUE_OPTS.contains(&a) {
+            k += 2;
+            continue;
+        }
+        if !a.starts_with('-') && (looks(a) || a.contains('$')) {
+            return true;
+        }
+        k += 1;
+    }
+    false
 }
 
-/// A test file: under a directory `test` or `tests`, or named `test_*` or
-/// `test-*`. Examples, benchmarks and tools, which are programs of their
-/// own, aren't counted.
-pub fn is_test(path: &str) -> bool {
+/// `$X`, `${X}` or `${X:-default}`, and nothing else.
+fn lone_var(s: &str) -> bool {
+    if let Some(inner) = s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        let name = inner
+            .split([':', '-', '=', '+', '?'])
+            .next()
+            .unwrap_or_default();
+        return is_ident(name) && !inner[name.len()..].contains(['{', '}']);
+    }
+    s.strip_prefix('$').is_some_and(is_ident)
+}
+
+/// Under a directory `test` or `tests`, or named `test_*` or `test-*`.
+fn test_path(path: &str) -> bool {
     let p = Path::new(path);
     let in_tests = p
         .parent()
@@ -195,7 +243,91 @@ fn has_glob(s: &str) -> bool {
     s.contains(['*', '?', '['])
 }
 
+/// `$@`, `$*` and their braced forms: a script's or function's arguments.
+fn all_args(s: &str) -> bool {
+    matches!(s, "$@" | "$*" | "${@}" | "${*}")
+}
+
+/// The shell functions `src` defines, and `src` with their lines blanked
+/// (line numbers kept): `name() { ...; }` on one line, or `name() {` (or
+/// `function name {`) down to its closing brace.
+fn functions(src: &str) -> (String, Vec<(String, String, usize)>) {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut funcs = Vec::new();
+    let depth = |t: &str| -> i64 {
+        t.chars()
+            .map(|c| match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            })
+            .sum()
+    };
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        let (decl, rest) = match t.strip_prefix("function ") {
+            Some(r) => (true, r.trim_start()),
+            None => (false, t),
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|&c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
+            .collect();
+        let after = rest[name.len()..].trim_start();
+        let after =
+            after
+                .strip_prefix("()")
+                .map(str::trim_start)
+                .or(if decl { Some(after) } else { None });
+        let Some(after) = after.filter(|a| !name.is_empty() && a.starts_with('{')) else {
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        };
+        let mut d = depth(after);
+        let mut body = after[1..].to_string();
+        let start = i;
+        out.push(String::new());
+        while d > 0 && i + 1 < lines.len() {
+            i += 1;
+            d += depth(lines[i]);
+            body.push('\n');
+            body.push_str(lines[i]);
+            out.push(String::new());
+        }
+        if let Some(end) = body.rfind('}') {
+            body.truncate(end);
+        }
+        funcs.push((name, body, start + 1));
+        i += 1;
+    }
+    (out.join("\n"), funcs)
+}
+
 impl Scan<'_> {
+    /// A test file, by its path ([`test_path`]) and, when it exists, by
+    /// having a `def test_` at its top level: a program under `tests/` (a
+    /// driver a shell test starts, a program that must not compile) isn't
+    /// one. Examples, benchmarks and tools aren't either.
+    pub fn is_test(&mut self, path: &str) -> bool {
+        if !test_path(path) {
+            return false;
+        }
+        if let Some(&t) = self.has_tests.get(path) {
+            return t;
+        }
+        let t = match fs::read_to_string(self.root.join(path)) {
+            Ok(src) => src
+                .lines()
+                .any(|l| l.starts_with("def test_") || l.starts_with("fn test_")),
+            Err(_) => true,
+        };
+        self.has_tests.insert(path.to_string(), t);
+        t
+    }
+
     fn exists(&self, rel: &str) -> bool {
         self.root.join(rel).is_file()
     }
@@ -258,13 +390,16 @@ impl Scan<'_> {
         m
     }
 
-    fn note(&mut self, ctx: &Ctx, line: usize, msg: String) {
-        self.notes.insert(Finding {
-            file: ctx.file.clone(),
-            line: ctx.line + line - 1,
-            message: msg,
-            detail: vec![],
-        });
+    fn note(&mut self, kind: Kind, ctx: &Ctx, line: usize, msg: String) {
+        self.notes.insert((
+            kind,
+            Finding {
+                file: ctx.file.clone(),
+                line: ctx.line + line - 1,
+                message: msg,
+                detail: vec![],
+            },
+        ));
     }
 
     /// The task `name` as seen from `feature`: its own feature's, else the
@@ -292,6 +427,7 @@ impl Scan<'_> {
             line: 1,
             runs: Vec::new(),
             calls: Vec::new(),
+            forwards: false,
         });
         self.scripts.insert(rel.clone(), u);
         if let Ok(src) = fs::read_to_string(self.root.join(&rel)) {
@@ -306,8 +442,10 @@ impl Scan<'_> {
                 feature: None,
             };
             self.units[u].file = ctx.file.clone();
+            let outer = std::mem::replace(&mut self.forwarded, false);
             self.shell(u, &src, 1, &ctx, &mut Vars::default());
-            if let Some(first) = self.units[u].runs.iter().map(|r| r.2).min() {
+            self.units[u].forwards = std::mem::replace(&mut self.forwarded, outer);
+            if let Some(first) = self.units[u].runs.iter().map(|r| r.3).min() {
                 self.units[u].line = first;
             }
         }
@@ -315,7 +453,14 @@ impl Scan<'_> {
     }
 
     fn shell(&mut self, unit: usize, src: &str, line: usize, ctx: &Ctx, vars: &mut Vars) {
-        for cmd in shell::commands(src, line) {
+        let (src, funcs) = functions(src);
+        for (name, body, at) in funcs {
+            vars.funcs
+                .entry(name)
+                .or_default()
+                .push((body, line + at - 1));
+        }
+        for cmd in shell::commands(&src, line) {
             self.command(unit, &cmd, ctx, vars);
         }
     }
@@ -392,7 +537,7 @@ impl Scan<'_> {
         if !matches!(head, "echo" | "printf" | "[" | "test") {
             for w in cmd {
                 for (sub, line) in &w.subs {
-                    self.shell(unit, sub, *line, ctx, vars);
+                    self.shell(unit, sub, *line, ctx, &mut vars.clone());
                 }
             }
         }
@@ -511,6 +656,7 @@ impl Scan<'_> {
                 };
                 vars.push_loop(&name, values);
             }
+            _ if vars.funcs.contains_key(h) => self.call_function(unit, h, args, ctx, vars),
             "while" | "until" => vars.push_loop("", None),
             "done" => vars.pop_loop(),
             "sh" | "bash" | "zsh" | "dash" | "source" | "." => {
@@ -525,18 +671,67 @@ impl Scan<'_> {
                     j += if args[j].text == "-o" { 2 } else { 1 };
                 }
                 if let Some(s) = args.get(j) {
-                    self.call_script(unit, &s.text, ctx, vars);
+                    self.call_script(unit, &s.text, &args[j + 1..], ctx, vars);
                 }
             }
             _ if h == "mojo" || h.ends_with("/mojo") => {
                 self.mojo(unit, head, args, ctx, vars, xargs)
             }
-            _ if h.ends_with(".sh") || h.contains('/') => self.call_script(unit, h, ctx, vars),
+            // The experimental compiler of the same name, as `mojo build`.
+            "ouromo" if args.first().is_some_and(|a| a.text == "build") => {
+                self.mojo(unit, head, args, ctx, vars, xargs)
+            }
+            _ if h.ends_with(".sh") || h.contains('/') => {
+                self.call_script(unit, h, args, ctx, vars)
+            }
             _ => {}
         }
     }
 
-    fn call_script(&mut self, unit: usize, path: &str, ctx: &Ctx, vars: &Vars) {
+    /// A shell function, called: its body read where it's called, with
+    /// `$1`... as the arguments; one that passes them on to `mojo build` is
+    /// a `mojo build` of them.
+    fn call_function(&mut self, unit: usize, name: &str, args: &[Word], ctx: &Ctx, vars: &Vars) {
+        if self.depth > 8 {
+            return;
+        }
+        let bodies = vars.funcs.get(name).cloned().unwrap_or_default();
+        let mut inner = vars.clone();
+        for (k, a) in args.iter().enumerate() {
+            let v = self.expand(&a.text, ctx, vars);
+            inner.set(&(k + 1).to_string(), v);
+        }
+        let outer = std::mem::replace(&mut self.forwarded, false);
+        self.depth += 1;
+        for (body, line) in bodies {
+            // `ctx.line` is where the text starts; `line` is in its numbering.
+            self.shell(unit, &body, line, ctx, &mut inner.clone());
+        }
+        self.depth -= 1;
+        let forwards = std::mem::replace(&mut self.forwarded, outer);
+        if forwards {
+            self.forward(unit, args, ctx, vars);
+        }
+    }
+
+    /// `args`, passed on to `mojo build`.
+    fn forward(&mut self, unit: usize, args: &[Word], ctx: &Ctx, vars: &Vars) {
+        let Some(first) = args.first() else { return };
+        let mut words = vec![Word {
+            text: "build".into(),
+            line: first.line,
+            subs: vec![],
+        }];
+        words.extend(args.iter().cloned());
+        let head = Word {
+            text: "mojo".into(),
+            line: first.line,
+            subs: vec![],
+        };
+        self.mojo(unit, &head, &words, ctx, vars, false);
+    }
+
+    fn call_script(&mut self, unit: usize, path: &str, args: &[Word], ctx: &Ctx, vars: &Vars) {
         let Some(paths) = self.expand(path, ctx, vars) else {
             return;
         };
@@ -556,15 +751,19 @@ impl Scan<'_> {
                 if s != unit {
                     self.units[unit].calls.push(s);
                 }
+                if self.units[s].forwards {
+                    self.forward(unit, args, ctx, vars);
+                }
             }
         }
     }
 
-    /// `mojo run f`, at `line`; counted when `f` is a test.
-    fn run(&mut self, unit: usize, f: String, ctx: &Ctx, line: usize) {
-        if is_test(&f) {
+    /// `mojo run f` or `mojo build f`, at `line`; counted when `f` is a
+    /// test.
+    fn run(&mut self, kind: Kind, unit: usize, f: String, ctx: &Ctx, line: usize) {
+        if self.is_test(&f) {
             let at = format!("{}:{line}", ctx.file);
-            self.units[unit].runs.push((f, at, line));
+            self.units[unit].runs.push((kind, f, at, line));
         }
     }
 
@@ -579,39 +778,50 @@ impl Scan<'_> {
     ) {
         let mut j = 0;
         let mut explicit = false;
+        let mut kind = Kind::Run;
         while j < args.len() {
             let a = args[j].text.as_str();
-            if a == "run" && !explicit {
+            if (a == "run" || a == "build") && !explicit {
                 explicit = true;
+                if a == "build" {
+                    kind = Kind::Build;
+                }
                 j += 1;
             } else if VALUE_OPTS.contains(&a) {
                 j += 2;
             } else if a.starts_with('-') && !SUBCOMMANDS.contains(&a) {
                 j += 1;
-            } else if lone_var(a)
-                && args[j + 1..]
-                    .iter()
-                    .any(|w| looks(&w.text) || w.text.contains('$'))
-            {
+            } else if lone_var(a) && later_source(&args[j + 1..]) {
                 // `mojo $FLAGS x.mojo`: options in a variable.
                 j += 1;
             } else {
                 break;
             }
         }
+        let verb = kind.verb();
+        let does = match kind {
+            Kind::Run => "runs",
+            Kind::Build => "builds",
+        };
         let line = ctx.line + head.line - 1;
         let Some(target) = args.get(j) else {
             if explicit || xargs {
                 self.note(
+                    kind,
                     ctx,
                     head.line,
-                    "can't tell which file this `mojo run` runs".into(),
+                    format!("can't tell which file this `{verb}` {does}"),
                 );
             }
             return;
         };
         let t = target.text.as_str();
         if !explicit && SUBCOMMANDS.contains(&t) {
+            return;
+        }
+        if kind == Kind::Build && all_args(t) {
+            // `mojo build "$@"`: what the caller passes is built.
+            self.forwarded = true;
             return;
         }
         if !t.contains('$') && !t.contains("{{") {
@@ -625,7 +835,7 @@ impl Scan<'_> {
                 self.place(t, ctx)
             };
             if let Some(f) = file {
-                self.run(unit, f, ctx, line);
+                self.run(kind, unit, f, ctx, line);
             }
             return;
         }
@@ -633,21 +843,23 @@ impl Scan<'_> {
             Some(files) if files.iter().all(|f| looks(f)) => {
                 if files.is_empty() {
                     self.note(
+                        kind,
                         ctx,
                         head.line,
-                        format!("`mojo run {t}`: it matches no file"),
+                        format!("`{verb} {t}`: it matches no file"),
                     );
                 }
                 for f in files {
                     if let Some(f) = self.place(&f, ctx) {
-                        self.run(unit, f, ctx, line);
+                        self.run(kind, unit, f, ctx, line);
                     }
                 }
             }
             _ => self.note(
+                kind,
                 ctx,
                 head.line,
-                format!("can't tell which files `mojo run {t}` runs"),
+                format!("can't tell which files `{verb} {t}` {does}"),
             ),
         }
     }
@@ -658,6 +870,8 @@ impl Scan<'_> {
 struct Vars {
     vars: HashMap<String, Option<Vec<String>>>,
     loops: Vec<(String, Option<Vec<String>>)>,
+    /// Shell functions: each definition's body and first line.
+    funcs: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl Vars {
@@ -823,13 +1037,20 @@ fn run_steps(src: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
-/// `mojo-run-per-test` over the project at `root`: findings, and notes
-/// where it can't tell.
+/// What one of the two rules found: findings, and notes where it can't tell.
+pub struct Found {
+    pub findings: Vec<Finding>,
+    pub notes: Vec<Finding>,
+}
+
+/// `mojo-run-per-test` and `mojo-build-per-test` over the project at
+/// `root`, each with its threshold.
 pub fn check(
     root: &Path,
     shown: &dyn Fn(&Path) -> String,
-    threshold: usize,
-) -> (Vec<Finding>, Vec<Finding>) {
+    run_threshold: usize,
+    build_threshold: usize,
+) -> (Found, Found) {
     let mut s = Scan {
         root,
         shown,
@@ -838,6 +1059,9 @@ pub fn check(
         units: Vec::new(),
         scripts: HashMap::new(),
         notes: BTreeSet::new(),
+        forwarded: false,
+        depth: 0,
+        has_tests: HashMap::new(),
     };
     let pixi = root.join("pixi.toml");
     let pixi_shown = shown(&pixi);
@@ -851,6 +1075,7 @@ pub fn check(
                 line: t.line,
                 runs: Vec::new(),
                 calls: Vec::new(),
+                forwards: false,
             });
         }
         for i in 0..s.tasks.len() {
@@ -895,6 +1120,7 @@ pub fn check(
                 line: key_line,
                 runs: Vec::new(),
                 calls: Vec::new(),
+                forwards: false,
             });
             let ctx = Ctx {
                 file: file.clone(),
@@ -919,53 +1145,87 @@ pub fn check(
         }
         out
     };
-    let runs_of = |u: usize| -> BTreeMap<String, String> {
-        let mut m = BTreeMap::new();
-        for v in closure(u) {
-            for (f, w, _) in &s.units[v].runs {
-                m.entry(f.clone()).or_insert_with(|| w.clone());
+    // Units whose closures are smaller first: what a unit runs is decided
+    // before the unit.
+    let closures: Vec<Vec<usize>> = (0..n).map(closure).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&u| (closures[u].len(), u));
+    let found = |kind: Kind, threshold: usize| -> Found {
+        let files_of = |u: usize| -> BTreeMap<String, String> {
+            let mut m = BTreeMap::new();
+            for &v in &closures[u] {
+                for (k, f, w, _) in &s.units[v].runs {
+                    if *k == kind {
+                        m.entry(f.clone()).or_insert_with(|| w.clone());
+                    }
+                }
             }
+            m
+        };
+        let mut reported = vec![false; n];
+        let mut out = BTreeSet::new();
+        for &u in &order {
+            let mut files = files_of(u);
+            for &v in &closures[u] {
+                if v != u && reported[v] {
+                    for f in files_of(v).keys() {
+                        files.remove(f);
+                    }
+                }
+            }
+            if files.len() <= threshold {
+                continue;
+            }
+            reported[u] = true;
+            let unit = &s.units[u];
+            let verb = kind.verb();
+            let mut sites: Vec<(&String, &String)> = files.iter().map(|(f, w)| (w, f)).collect();
+            sites.sort();
+            let mut detail: Vec<String> = sites
+                .iter()
+                .take(3)
+                .map(|(w, f)| format!("{w}: {verb} {f}"))
+                .collect();
+            if files.len() > 3 {
+                detail.push(format!("... and {} more", files.len() - 3));
+            }
+            let what = match kind {
+                Kind::Run => "each compiles the code they share again",
+                Kind::Build => "each build compiles the code they share again",
+            };
+            out.insert(Finding {
+                file: unit.file.clone(),
+                line: unit.line,
+                message: format!(
+                    "{} runs `{verb}` on {} test files, more than {threshold}: {what}; build them once, into one binary",
+                    unit.label,
+                    files.len()
+                ),
+                detail,
+            });
         }
-        m
-    };
-    let over: Vec<bool> = (0..n).map(|u| runs_of(u).len() > threshold).collect();
-    let mut found = BTreeSet::new();
-    for u in 0..n {
-        if !over[u] || closure(u).iter().any(|&v| v != u && over[v]) {
-            continue;
-        }
-        let runs = runs_of(u);
-        let unit = &s.units[u];
-        let mut sites: Vec<(&String, &String)> = runs.iter().map(|(f, w)| (w, f)).collect();
-        sites.sort();
-        let mut detail: Vec<String> = sites
+        let rule = match kind {
+            Kind::Run => "mojo-run-per-test",
+            Kind::Build => "mojo-build-per-test",
+        };
+        let notes = s
+            .notes
             .iter()
-            .take(3)
-            .map(|(w, f)| format!("{w}: mojo run {f}"))
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, f)| {
+                let mut f = f.clone();
+                f.message = format!("{rule}: {}", f.message);
+                f
+            })
             .collect();
-        if runs.len() > 3 {
-            detail.push(format!("... and {} more", runs.len() - 3));
+        Found {
+            findings: out.into_iter().collect(),
+            notes,
         }
-        found.insert(Finding {
-            file: unit.file.clone(),
-            line: unit.line,
-            message: format!(
-                "{} runs `mojo run` on {} .mojo files, more than {threshold}: each compiles the code they share again; build them once, into one binary",
-                unit.label,
-                runs.len()
-            ),
-            detail,
-        });
-    }
-    let notes = s
-        .notes
-        .into_iter()
-        .map(|mut f| {
-            f.message = format!("mojo-run-per-test: {}", f.message);
-            f
-        })
-        .collect();
-    (found.into_iter().collect(), notes)
+    };
+    let runs = found(Kind::Run, run_threshold);
+    let builds = found(Kind::Build, build_threshold);
+    (runs, builds)
 }
 
 #[cfg(test)]
