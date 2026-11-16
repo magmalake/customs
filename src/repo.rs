@@ -22,6 +22,8 @@ use crate::lex::{self, Import};
 const SKIP: [&str; 4] = ["build", "target", "node_modules", "__pycache__"];
 
 pub struct File {
+    /// The path as read.
+    pub path: PathBuf,
     /// The path as reported: relative to the current directory, when it
     /// is under it.
     pub display: String,
@@ -98,7 +100,7 @@ fn module_name(root: &Path, path: &Path) -> Option<(String, bool)> {
     Some((parts.join("."), is_pkg))
 }
 
-fn display(path: &Path) -> String {
+pub fn display(path: &Path) -> String {
     let shown = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
@@ -116,6 +118,7 @@ fn read(path: &Path, module: Option<(String, bool)>, local: bool) -> io::Result<
     let src = fs::read_to_string(path)?;
     let text = lex::strip(&src);
     Ok(File {
+        path: path.to_path_buf(),
         display: display(path),
         is_pkg: module.as_ref().is_some_and(|m| m.1),
         module: module.map(|m| m.0),

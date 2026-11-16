@@ -1,33 +1,62 @@
 # customs
 
-Checks a Mojo project's imports. Two rules, fixed for now:
+Checks a Mojo project's imports, and how it runs its tests. Four rules, in
+two groups:
 
-1. **No import cycles.** A module imports only modules that don't import it
-   back, directly or through others. Mojo compiles a cycle, so the
-   compiler won't catch one. Every import counts: one inside a function,
-   and one of a package's `__init__.mojo` (so a module of `pkg` that does
-   `from pkg import x`, while `pkg/__init__.mojo` imports that module, is
-   a cycle).
-2. **Import a name from the file that defines it.** `from m import x`, and
-   `m.x` after `import m` (or `from pkg import m`), name the module where
-   `x` is defined, not one that only imports it and passes it on. A
-   package's `__init__.mojo` is the one place a re-export may be imported
-   from.
+**`imports`**
+
+1. **`import-cycle`: no import cycles.** A module imports only modules that
+   don't import it back, directly or through others. Mojo compiles a cycle,
+   so the compiler won't catch one. Every import counts: one inside a
+   function, and one of a package's `__init__.mojo` (so a module of `pkg`
+   that does `from pkg import x`, while `pkg/__init__.mojo` imports that
+   module, is a cycle).
+2. **`import-through-reexport`: import a name from the file that defines
+   it.** `from m import x`, and `m.x` after `import m` (or
+   `from pkg import m`), name the module where `x` is defined, not one that
+   only imports it and passes it on. A package's `__init__.mojo` is the one
+   place a re-export may be imported from.
+
+**`tests`**
+
+3. **`functions-in-imported-module`: a file that calls
+   `__functions_in_module()` isn't imported.** In Mojo 1.2.0 that list is
+   incomplete when its file is imported rather than built as the main file.
+   A test file whose `main` is
+   `TestSuite.discover_tests[__functions_in_module()]().run()`, imported and
+   run by another file (to build every test into one binary), can run some
+   of its tests or none, and exit 0. The finding names the importing line.
+   Build the tests once by registering them by name instead, as
+   [census's `scripts/test.sh`](https://github.com/morca-dev/census/blob/main/scripts/test.sh)
+   does: it generates the main under `build/` (which customs skips), imports
+   each `def test_*` by name, and checks the count each file runs.
+4. **`mojo-run-per-test`: no command runs `mojo run` on more than 3 test
+   files.** Each `mojo run` compiles the library code the tests share again.
+   In [morca-dev/census](https://github.com/morca-dev/census/issues/207),
+   35 `mojo run -I src tests/test_*.mojo` took 665 s on a 16-core Linux
+   machine (building each file separately, 663 s), and one binary of every
+   test about 210 s; in CI the step went from 550 s to 256 s. The finding
+   names the task, CI step or script, and the files it runs. See
+   [How it reads tasks, workflows and scripts](#how-it-reads-tasks-workflows-and-scripts)
+   for what it sees.
+
+Every rule is `deny` unless [configured](#configuration): without a
+configuration, `imports` behaves as it did before the `tests` group.
 
 ```text
 $ customs
-src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -> morca._internal.web.page -> morca._internal.ui.layout
+src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -> morca._internal.web.page -> morca._internal.ui.layout [import-cycle]
     src/morca/_internal/ui/layout.mojo:16: from morca._internal.web.page import Page
     src/morca/_internal/web/page.mojo:8: from morca._internal.ui.layout import with_header_help
-src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows
+src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows [import-through-reexport]
 ...
-customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export
+customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files
 ```
 
 ## Usage
 
 ```text
-customs [-I DIR]... [-v] [PROJECT]
+customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
 ```
 
 - **PROJECT** (default `.`): its modules are the `.mojo` files under
@@ -39,13 +68,43 @@ customs [-I DIR]... [-v] [PROJECT]
   directories, `build`, `target` and `node_modules` are skipped.
 - **`-I DIR`**: modules of another project, as `mojo build -I DIR`. Names
   imported from them are checked; their own imports aren't reported.
-- **`-v`**: also notes each name that isn't found at the top level of the
-  module it's imported from (a definition inside a `comptime if`, or a
-  local variable that shadows a module's name). Notes don't fail the run.
+- **`-A NAME`, `-W NAME`, `-D NAME`**: allow (don't check), warn or deny a
+  rule or a group, over the configuration file.
+- **`-v`**: also notes what it can't place: each name that isn't found at
+  the top level of the module it's imported from (a definition inside a
+  `comptime if`, or a local variable that shadows a module's name), and
+  each `mojo run` whose files it can't tell. Notes don't fail the run.
 
-It exits 1 when it finds anything, and 2 on a usage or read error. Under
-GitHub Actions (`GITHUB_ACTIONS=true`) it also prints each finding as an
-`::error` annotation, so the lines show on a pull request.
+Each finding ends with its rule's name. It exits 1 when a `deny` rule finds
+anything (a `warn` rule's findings are printed as `warning:` and don't
+fail), and 2 on a usage, configuration or read error. Under GitHub Actions
+(`GITHUB_ACTIONS=true`) it also prints each finding as an `::error` (or
+`::warning`) annotation, so the lines show on a pull request.
+
+## Configuration
+
+In the project's `pixi.toml`, after clippy's style: a level per rule or per
+group, and each rule's numbers as flat kebab-case keys named after it.
+
+```toml
+[tool.customs]
+mojo-run-per-test-threshold = 3     # report a command that runs more test files
+
+[tool.customs.lints]
+imports = "deny"                    # group: import-cycle, import-through-reexport
+tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test
+# The examples' tests are separate programs: they can't share a binary.
+mojo-run-per-test = "warn"          # a rule's own level wins over its group's
+```
+
+- Levels: `deny` reports and fails, `warn` reports and passes, `allow`
+  doesn't check. Both groups are `deny` by default.
+- A rule's own level wins over its group's, in the file and on the command
+  line; the command line (`-A`, `-W`, `-D`) wins over the file.
+- `lints` may also be an inline table (`lints = { tests = "warn" }`) or
+  dotted keys (`lints.tests = "warn"`).
+- An unknown option, rule, group or level is an error (exit 2), so a
+  misspelt one doesn't go unnoticed. pixi itself ignores the `[tool]` table.
 
 ## In GitHub Actions
 
@@ -54,7 +113,7 @@ GitHub Actions (`GITHUB_ACTIONS=true`) it also prints each finding as an
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.2.1
+      - uses: magmalake/customs@v0.3.0
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -74,7 +133,7 @@ on each pull request, as a job their one required check waits for, as in
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.2.1
+      - uses: magmalake/customs@v0.3.0
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]
@@ -111,6 +170,42 @@ and `import …` statements are read wherever they are, and a module's names
 are what it defines at column 0 with `def`, `fn`, `struct`, `trait`,
 `comptime`, `alias` or `var`. A name it can't place is a note, never a
 finding.
+
+For `functions-in-imported-module`, an import names a file when it's one of
+the project's modules, or a file beside the importer (`import test_a` in
+`tests/all.mojo` is `tests/test_a.mojo`, as Mojo finds it next to the file
+it builds). A file that only mentions `__functions_in_module()` in a comment
+or a string doesn't count.
+
+## How it reads tasks, workflows and scripts
+
+`mojo-run-per-test` is a scanner too. It reads, at PROJECT:
+
+- the tasks of `pixi.toml`: `[tasks]`, `[feature.*.tasks]` and their
+  `target.*` forms, as strings, `{ cmd = …, depends-on = … }` tables or
+  `[tasks.NAME]` tables; a task is counted with its `depends-on` chain;
+- the `run:` steps of `.github/workflows/*.yml` and `*.yaml`;
+- the shell scripts those run (`sh x.sh`, `bash x.sh`, `./x.sh`,
+  `scripts/x.sh`, `source x.sh`), the code of `bash -c '…'` and of `$(…)`,
+  and the tasks run with `pixi run NAME`; and what those run in turn.
+
+In each, the commands are cut into words as a shell would, comments and
+here-documents dropped, and a `mojo run X.mojo`, or `mojo X.mojo` (the
+same), counts `X.mojo`. Inside `for f in WORDS; do … done`, `mojo run "$f"`
+(or `tests/test_$f.mojo`) counts each word, a glob (`tests/test_*.mojo`)
+counting each file it matches, as does `$(ls GLOB)`; so do variables set
+to such words. Only test files are counted: under a directory `test` or
+`tests`, or named `test_*`. A task, step or script is reported when it runs
+more than the threshold, and none of what it runs is over by itself: the
+one place to change. `mojo build` and the binary it makes aren't counted.
+
+Where it can't tell, it doesn't report. A `mojo run` whose file it can't
+work out (a variable it doesn't know, a matrix value `${{ … }}`, a task
+argument `{{ … }}`, `xargs`, `while read`, `find`) is a note with `-v`, not
+a count. It doesn't follow shell functions, `cd`, `make` or `just`, scripts
+named by a variable, a task's `cwd`, nor `pyproject.toml`'s `[tool.pixi]`.
+`echo` and `printf` lines are skipped, so a `mojo run` in a message isn't
+counted.
 
 ## Building
 

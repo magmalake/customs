@@ -3,33 +3,50 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use customs::check::{self, Finding};
-use customs::repo::Repo;
+use customs::config::{Config, Level, Rule, RULES};
+use customs::repo::{self, Repo};
+use customs::runs;
 
 const USAGE: &str = "\
-usage: customs [-I DIR]... [-v] [PROJECT]
+usage: customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
 
-Checks the imports of the Mojo project at PROJECT (default: .):
+Checks the Mojo project at PROJECT (default: .). Its rules, by group:
 
-  1. no import cycles between its modules;
-  2. each name imported from the module that defines it, not one that
-     re-exports it (a package's __init__.mojo may re-export).
+  imports
+    import-cycle                  no import cycles between its modules
+    import-through-reexport       each name imported from the module that
+                                  defines it, not one that re-exports it (a
+                                  package's __init__.mojo may re-export)
+  tests
+    functions-in-imported-module  no import of a file that calls
+                                  __functions_in_module()
+    mojo-run-per-test             no task, CI step or script that runs
+                                  `mojo run` on more than 3 .mojo files
 
 Its modules are the .mojo files under PROJECT/src (or PROJECT, without a
 src); its other .mojo files (tests, examples, ...) are checked as importers.
+Levels and options are read from the [tool.customs] table of
+PROJECT/pixi.toml; every rule is `deny` unless set there or here.
 
   -I DIR         modules of another project, as `mojo build -I DIR`: names
                  imported from them are checked, they aren't
-  -v, --verbose  also note names not found in the module they're imported from
+  -A NAME        allow (don't check) a rule or a group
+  -W NAME        warn: report it, but don't fail
+  -D NAME        deny: report it and fail
+  -v, --verbose  also note what it can't place: names not found in the module
+                 they're imported from, `mojo run`s whose files it can't tell
   -h, --help     this
   -V, --version  the version
 
-Exits 1 when it finds anything, 2 on a usage or read error. Under GitHub
-Actions (GITHUB_ACTIONS=true) it also prints each finding as an annotation.
+Exits 1 when a denied rule finds anything, 2 on a usage, configuration or
+read error. Under GitHub Actions (GITHUB_ACTIONS=true) it also prints each
+finding as an annotation.
 ";
 
 struct Args {
     project: PathBuf,
     includes: Vec<PathBuf>,
+    levels: Vec<(String, Level)>,
     verbose: bool,
 }
 
@@ -37,11 +54,27 @@ fn parse() -> Result<Option<Args>, String> {
     let mut args = Args {
         project: PathBuf::from("."),
         includes: Vec::new(),
+        levels: Vec::new(),
         verbose: false,
     };
     let mut project = None;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
+        let level = match a.get(..2) {
+            Some("-A") => Some(Level::Allow),
+            Some("-W") => Some(Level::Warn),
+            Some("-D") => Some(Level::Deny),
+            _ => None,
+        };
+        if let Some(l) = level {
+            let name = if a.len() > 2 {
+                a[2..].to_string()
+            } else {
+                it.next().ok_or(format!("{a} needs a rule or group"))?
+            };
+            args.levels.push((name, l));
+            continue;
+        }
         match a.as_str() {
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -82,24 +115,33 @@ fn escape(s: &str) -> String {
         .replace('\n', "%0A")
 }
 
-fn show(f: &Finding, kind: &str, github: bool) {
-    println!("{}:{}: {kind}{}", f.file, f.line, f.message);
+fn show(f: &Finding, kind: Option<Level>, rule: Rule, github: bool) {
+    let (prefix, command) = match kind {
+        Some(Level::Deny) => ("", Some("error")),
+        Some(Level::Warn) => ("warning: ", Some("warning")),
+        _ => ("note: ", None),
+    };
+    println!("{}:{}: {prefix}{} [{rule}]", f.file, f.line, f.message);
     for d in &f.detail {
         println!("    {d}");
     }
-    if github && kind.is_empty() {
-        let mut msg = f.message.clone();
+    if let (true, Some(command)) = (github, command) {
+        let mut msg = format!("{} [{rule}]", f.message);
         for d in &f.detail {
             msg.push('\n');
             msg.push_str(d);
         }
         println!(
-            "::error file={},line={},title=customs::{}",
+            "::{command} file={},line={},title=customs::{}",
             f.file,
             f.line,
             escape(&msg)
         );
     }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn main() -> ExitCode {
@@ -111,6 +153,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let mut config = match Config::load(&args.project) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("customs: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for (name, l) in &args.levels {
+        if let Err(e) = config.set(name, *l) {
+            eprintln!("customs: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let repo = match Repo::load(&args.project, &args.includes) {
         Ok(r) => r,
         Err(e) => {
@@ -119,14 +174,35 @@ fn main() -> ExitCode {
         }
     };
     let github = env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
-    let cycles = check::cycles(&repo);
-    let (reexports, notes) = check::reexports(&repo);
-    for f in cycles.iter().chain(&reexports) {
-        show(f, "", github);
+    let on = |r: Rule| config.level(r) != Level::Allow;
+    let mut results: Vec<(Rule, Vec<Finding>, Vec<Finding>)> = Vec::new();
+    for rule in RULES {
+        if !on(rule) {
+            continue;
+        }
+        let (found, notes) = match rule {
+            Rule::ImportCycle => (check::cycles(&repo), Vec::new()),
+            Rule::ImportThroughReexport => check::reexports(&repo),
+            Rule::FunctionsInImportedModule => (check::functions_in_imported(&repo), Vec::new()),
+            Rule::MojoRunPerTest => {
+                runs::check(&args.project, &|p| repo::display(p), config.threshold)
+            }
+        };
+        results.push((rule, found, notes));
+    }
+    let mut failed = false;
+    for (rule, found, _) in &results {
+        let level = config.level(*rule);
+        failed |= level == Level::Deny && !found.is_empty();
+        for f in found {
+            show(f, Some(level), *rule, github);
+        }
     }
     if args.verbose {
-        for f in &notes {
-            show(f, "note: ", github);
+        for (rule, _, notes) in &results {
+            for f in notes {
+                show(f, None, *rule, github);
+            }
         }
     }
     let modules = repo
@@ -135,16 +211,50 @@ fn main() -> ExitCode {
         .filter(|f| f.local && f.module.is_some())
         .count();
     let files = repo.files.iter().filter(|f| f.local).count();
+    let counts: Vec<String> = results
+        .iter()
+        .map(|(rule, found, _)| {
+            let n = found.len();
+            let what = match rule {
+                Rule::ImportCycle => plural(n, "import cycle", "import cycles"),
+                Rule::ImportThroughReexport => plural(
+                    n,
+                    "import through a re-export",
+                    "imports through a re-export",
+                ),
+                Rule::FunctionsInImportedModule => plural(
+                    n,
+                    "import of a file that calls __functions_in_module()",
+                    "imports of a file that calls __functions_in_module()",
+                ),
+                Rule::MojoRunPerTest => format!(
+                    "{} more than {} files",
+                    plural(
+                        n,
+                        "command that runs `mojo run` on",
+                        "commands that run `mojo run` on"
+                    ),
+                    config.threshold
+                ),
+            };
+            if config.level(*rule) == Level::Warn && n > 0 {
+                format!("{what} (warn)")
+            } else {
+                what
+            }
+        })
+        .collect();
     eprintln!(
-        "customs: {modules} modules, {files} files: {} import cycle{}, {} import{} through a re-export",
-        cycles.len(),
-        if cycles.len() == 1 { "" } else { "s" },
-        reexports.len(),
-        if reexports.len() == 1 { "" } else { "s" },
+        "customs: {modules} modules, {files} files: {}",
+        if counts.is_empty() {
+            "every rule allowed".to_string()
+        } else {
+            counts.join(", ")
+        }
     );
-    if cycles.is_empty() && reexports.is_empty() {
-        ExitCode::SUCCESS
-    } else {
+    if failed {
         ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
