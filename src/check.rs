@@ -8,7 +8,16 @@
 //!    and `m.x` (after `import m`) name `x`'s own module, not one that only
 //!    imports it and passes it on; a package's `__init__.mojo` is the one
 //!    place a re-export is imported from.
-//! 3. **No import of a file that calls `__functions_in_module()`.** In Mojo
+//! 3. **No unused imports.** Every name a file imports is used in it,
+//!    outside a package's `__init__.mojo`, whose imports are what it
+//!    re-exports. `from m import x as x` (or `import m as m`) keeps one on
+//!    purpose, as Python's typing convention marks an explicit re-export.
+//!
+//! A `# noqa` comment on an import's line allows these on it, as flake8
+//! and ruff read one: `# noqa` alone allows all, `# noqa: unused-import`
+//! (rules or groups, by name) only those. Cycles can't be allowed there.
+//!
+//! 4. **No import of a file that calls `__functions_in_module()`.** In Mojo
 //!    1.2.0 that list is incomplete in a module that is imported rather
 //!    than built as the main file, so a test file whose `main` discovers
 //!    its tests with it runs only some of them, or none, when another file
@@ -17,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use crate::config::Rule;
 use crate::lex::{Import, What};
 use crate::repo::{File, Repo};
 
@@ -283,25 +293,34 @@ pub fn reexports(repo: &Repo) -> (Vec<Finding>, Vec<Finding>) {
     let mut found = BTreeSet::new();
     let mut notes = BTreeSet::new();
     for f in repo.files.iter().filter(|f| f.local) {
-        let mut report = |line: usize, shown: String, module: &str, name: &str, l: Lookup| match l {
-            Lookup::Fine => {}
-            Lookup::Reexport(d) => {
-                found.insert(Finding {
+        let allowed = |lines: &[usize]| {
+            let r = Rule::ImportThroughReexport;
+            f.noqa(lines, r.name(), r.group())
+        };
+        let mut report = |lines: &[usize], shown: String, module: &str, name: &str, l: Lookup| {
+            match l {
+                Lookup::Fine => {}
+                Lookup::Reexport(_) if allowed(lines) => {}
+                Lookup::Reexport(d) => {
+                    let line = lines[0];
+                    found.insert(Finding {
                     file: f.display.clone(),
                     line,
                     message: format!("{shown}: `{name}` is defined in {d}, and {module} only re-exports it; import it from {d}"),
                     detail: vec![],
                 });
-            }
-            Lookup::Unknown => {
-                notes.insert(Finding {
-                    file: f.display.clone(),
-                    line,
-                    message: format!(
+                }
+                Lookup::Unknown => {
+                    let line = lines[0];
+                    notes.insert(Finding {
+                        file: f.display.clone(),
+                        line,
+                        message: format!(
                         "{shown}: `{name}` isn't defined or imported at the top level of {module}"
                     ),
-                    detail: vec![],
-                });
+                        detail: vec![],
+                    });
+                }
             }
         };
         // `prefix.x` for each module the file names by `prefix`.
@@ -320,7 +339,7 @@ pub fn reexports(repo: &Repo) -> (Vec<Finding>, Vec<Finding>) {
                         let Some(m) = repo.get(&target) else { continue };
                         let shown = import_text(imp, Some(&n.name));
                         report(
-                            imp.line,
+                            &[imp.line, n.line],
                             shown,
                             &target,
                             &n.name,
@@ -342,7 +361,7 @@ pub fn reexports(repo: &Repo) -> (Vec<Finding>, Vec<Finding>) {
             }
             for (name, line) in crate::lex::uses(&f.text, &prefix) {
                 report(
-                    line,
+                    &[line],
                     format!("{prefix}.{name}"),
                     &target,
                     &name,
@@ -405,9 +424,13 @@ pub fn functions_in_imported(repo: &Repo) -> Vec<Finding> {
                 continue;
             };
             let mut cands: Vec<(PathBuf, Option<&str>)> = Vec::new();
+            let r = Rule::FunctionsInImportedModule;
             match &imp.what {
                 What::Names(names) => {
-                    for n in names {
+                    for n in names
+                        .iter()
+                        .filter(|n| !f.noqa(&[imp.line, n.line], r.name(), r.group()))
+                    {
                         let sub = format!("{target}.{}", n.name);
                         let subs = files_of(repo, f, &sub);
                         if subs.is_empty() {
@@ -421,6 +444,7 @@ pub fn functions_in_imported(repo: &Repo) -> Vec<Finding> {
                         }
                     }
                 }
+                What::Module(_) if f.noqa(&[imp.line], r.name(), r.group()) => {}
                 What::Module(_) => {
                     cands.extend(files_of(repo, f, &target).into_iter().map(|p| (p, None)))
                 }
@@ -444,6 +468,70 @@ pub fn functions_in_imported(repo: &Repo) -> Vec<Finding> {
                     ),
                     detail: vec![format!("{lister}:{line}: __functions_in_module()")],
                 });
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Rule 3: each imported name a file doesn't use, outside a package's
+/// `__init__.mojo` (whose imports are its re-exports). A name kept with a
+/// redundant alias (`x as x`) or a `# noqa` isn't one.
+pub fn unused(repo: &Repo) -> Vec<Finding> {
+    let r = Rule::UnusedImport;
+    let mut out = BTreeSet::new();
+    for f in repo.files.iter().filter(|f| f.local && !f.is_pkg) {
+        let used = crate::lex::used(&f.text, &f.imports);
+        for imp in &f.imports {
+            match &imp.what {
+                What::Names(names) => {
+                    for n in names {
+                        if n.name == "*"
+                            || n.redundant
+                            || used.contains(&n.alias)
+                            || f.noqa(&[imp.line, n.line], r.name(), r.group())
+                        {
+                            continue;
+                        }
+                        let mut shown = import_text(imp, Some(&n.name));
+                        if n.alias != n.name {
+                            shown.push_str(&format!(" as {}", n.alias));
+                        }
+                        out.insert(Finding {
+                            file: f.display.clone(),
+                            line: n.line,
+                            message: format!(
+                                "{shown}: `{}` isn't used in this file; remove it, or keep it with `# noqa: unused-import`",
+                                n.alias
+                            ),
+                            detail: vec![],
+                        });
+                    }
+                }
+                What::Module(alias) => {
+                    // `import a.b` names `a`; `import a.b as c`, `c`.
+                    let bound = alias
+                        .clone()
+                        .unwrap_or_else(|| imp.module.split('.').next().unwrap_or("").to_string());
+                    if alias.as_deref() == Some(imp.module.as_str())
+                        || used.contains(&bound)
+                        || f.noqa(&[imp.line], r.name(), r.group())
+                    {
+                        continue;
+                    }
+                    let mut shown = import_text(imp, None);
+                    if let Some(a) = alias {
+                        shown.push_str(&format!(" as {a}"));
+                    }
+                    out.insert(Finding {
+                        file: f.display.clone(),
+                        line: imp.line,
+                        message: format!(
+                            "{shown}: `{bound}` isn't used in this file; remove it, or keep it with `# noqa: unused-import`"
+                        ),
+                        detail: vec![],
+                    });
+                }
             }
         }
     }

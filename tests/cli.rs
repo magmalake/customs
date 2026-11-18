@@ -29,7 +29,16 @@ struct Run {
     err: String,
 }
 
+/// customs on `dir`, `unused-import` allowed: most fixtures import names
+/// they don't use, to test the other rules.
 fn run(dir: &Path, extra: &[&str]) -> Run {
+    let mut args = vec!["-A", "unused-import"];
+    args.extend_from_slice(extra);
+    run_all(dir, &args)
+}
+
+/// customs on `dir`, every rule at its level.
+fn run_all(dir: &Path, extra: &[&str]) -> Run {
     let o = Command::new(env!("CARGO_BIN_EXE_customs"))
         .args(extra)
         .arg(dir)
@@ -51,19 +60,20 @@ fn a_clean_project_passes() {
         ("src/app/core.mojo", "struct Thing:\n    pass\n"),
         (
             "src/app/use.mojo",
-            "from app.core import Thing\nfrom app import Thing as T\n",
+            "from app.core import Thing\nfrom app import Thing as T\ndef f(a: Thing, b: T): pass\n",
         ),
         (
             "tests/t.mojo",
-            "from app import Thing\nfrom app.core import Thing\n",
+            "from app import Thing\nfrom app.core import Thing\ndef main():\n    _ = Thing()\n",
         ),
     ]);
-    let r = run(&d, &[]);
+    let r = run_all(&d, &[]);
     assert_eq!(r.code, 0, "{}{}", r.out, r.err);
     assert!(r.out.is_empty(), "{}", r.out);
     assert!(
-        r.err
-            .contains("3 modules, 4 files: 0 import cycles, 0 imports through a re-export"),
+        r.err.contains(
+            "3 modules, 4 files: 0 import cycles, 0 imports through a re-export, 0 unused imports"
+        ),
         "{}",
         r.err
     );
@@ -622,4 +632,83 @@ fn a_unit_over_by_itself_beside_one_already_reported() {
         r.out
     );
     assert!(!r.out.contains("task `wrap`"), "{}", r.out);
+}
+
+#[test]
+fn unused_imports_are_reported_on_their_own_line() {
+    let d = project(&[
+        ("src/u/__init__.mojo", "from u.a import f, g\n"),
+        (
+            "src/u/a.mojo",
+            "def f(): pass\ndef g(): pass\nstruct S: pass\n",
+        ),
+        (
+            "src/u/b.mojo",
+            "\"\"\"Uses `g`, in prose only.\"\"\"\nfrom u.a import (\n    f,\n    g,\n    S as T,\n)\nimport u.a\nimport u.a as ua\nfrom std.os import *\n\ndef h(x: T):\n    from u.a import g\n    f()\n    other.g()\n",
+        ),
+        ("tests/t.mojo", "import u.a\nfrom u.a import S\n\ndef main():\n    u.a.f()\n"),
+    ]);
+    let r = run_all(&d, &[]);
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    let lines: Vec<&str> = r.out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "src/u/b.mojo:4: from u.a import g: `g` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]",
+            "src/u/b.mojo:7: import u.a: `u` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]",
+            "src/u/b.mojo:8: import u.a as ua: `ua` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]",
+            "src/u/b.mojo:12: from u.a import g: `g` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]",
+            "tests/t.mojo:2: from u.a import S: `S` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]",
+        ],
+        "{}",
+        r.out
+    );
+    assert!(r.err.contains(", 5 unused imports"), "{}", r.err);
+    // Allowed, like any rule.
+    assert_eq!(run_all(&d, &["-A", "unused-import"]).code, 0);
+}
+
+#[test]
+fn an_import_kept_with_a_redundant_alias_or_noqa() {
+    let d = project(&[
+        ("src/k/__init__.mojo", ""),
+        ("src/k/a.mojo", "def f(): pass\ndef g(): pass\ndef h(): pass\ndef i(): pass\ndef j(): pass\n"),
+        (
+            "src/k/shim.mojo",
+            "\"\"\"Moved to k.a; the names stay importable from here.\"\"\"\nfrom k.a import f as f\nfrom k.a import g  # noqa\nfrom k.a import h  # NOQA: unused-import\nfrom k.a import (  # noqa: imports\n    i,\n)\nfrom k.a import (\n    j,  # noqa: unused-import\n)\nimport k.a as a  # noqa: F401\n",
+        ),
+    ]);
+    let r = run_all(&d, &[]);
+    let lines: Vec<&str> = r.out.lines().collect();
+    // `F401` is flake8's name for it, not customs's: it allows nothing.
+    assert_eq!(
+        lines,
+        vec!["src/k/shim.mojo:11: import k.a as a: `a` isn't used in this file; remove it, or keep it with `# noqa: unused-import` [unused-import]"],
+        "{}",
+        r.out
+    );
+}
+
+#[test]
+fn noqa_allows_a_reexport_but_not_a_cycle() {
+    let d = project(&[
+        ("src/q/__init__.mojo", ""),
+        ("src/q/defs.mojo", "struct Row: pass\n"),
+        ("src/q/view.mojo", "from q.defs import Row\ndef show(r: Row): pass\n"),
+        (
+            "src/q/page.mojo",
+            "from q.view import Row  # noqa: import-through-reexport\nfrom q.view import (\n    show,\n    Row as R,  # noqa\n)\ndef f(a: Row, b: R): show(a)\n",
+        ),
+        ("src/c/__init__.mojo", ""),
+        ("src/c/a.mojo", "from c.b import g  # noqa\ndef f(): g()\n"),
+        ("src/c/b.mojo", "from c.a import f  # noqa\ndef g(): f()\n"),
+    ]);
+    let r = run_all(&d, &[]);
+    let lines: Vec<&str> = r.out.lines().filter(|l| !l.starts_with("    ")).collect();
+    assert_eq!(
+        lines,
+        vec!["src/c/a.mojo:1: import cycle: c.a -> c.b -> c.a [import-cycle]"],
+        "{}",
+        r.out
+    );
 }

@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::lex::{self, Import};
+use crate::lex::{self, Import, Noqa};
 
 /// Directories never walked.
 const SKIP: [&str; 4] = ["build", "target", "node_modules", "__pycache__"];
@@ -37,6 +37,17 @@ pub struct File {
     pub defs: HashSet<String>,
     /// The file through [`lex::strip`].
     pub text: String,
+    /// The `# noqa` comments, by line.
+    pub noqa: HashMap<usize, Noqa>,
+}
+
+impl File {
+    /// Whether a `# noqa` on any of `lines` allows `rule` (in `group`).
+    pub fn noqa(&self, lines: &[usize], rule: &str, group: &str) -> bool {
+        lines
+            .iter()
+            .any(|l| self.noqa.get(l).is_some_and(|n| n.allows(rule, group)))
+    }
 }
 
 pub struct Repo {
@@ -116,7 +127,11 @@ pub fn display(path: &Path) -> String {
 
 fn read(path: &Path, module: Option<(String, bool)>, local: bool) -> io::Result<File> {
     let src = fs::read_to_string(path)?;
-    let text = lex::strip(&src);
+    let (text, comments) = lex::strip_keeping_comments(&src);
+    let noqa = comments
+        .iter()
+        .filter_map(|(l, c)| lex::noqa(c).map(|n| (*l, n)))
+        .collect();
     Ok(File {
         path: path.to_path_buf(),
         display: display(path),
@@ -126,6 +141,7 @@ fn read(path: &Path, module: Option<(String, bool)>, local: bool) -> io::Result<
         imports: lex::imports(&text),
         defs: lex::defs(&text),
         text,
+        noqa,
     })
 }
 

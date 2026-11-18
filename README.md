@@ -1,7 +1,8 @@
 # customs
 
-Checks a Mojo project's imports, and how it builds its tests. Five rules, in
-two groups:
+Checks a Mojo project's imports, and how it builds its tests. Six rules, in
+two groups. The full guide, with examples and how to fix each finding, is
+on [magmalake.org/s/customs](https://magmalake.org/s/customs).
 
 **`imports`**
 
@@ -16,10 +17,21 @@ two groups:
    `from pkg import m`), name the module where `x` is defined, not one that
    only imports it and passes it on. A package's `__init__.mojo` is the one
    place a re-export may be imported from.
+3. **`unused-import`: every name a file imports is used in it.** Outside a
+   package's `__init__.mojo`, whose imports are what it re-exports. A
+   module that only passes names on (a compatibility shim) becomes a
+   package: `shim.mojo` -> `shim/__init__.mojo`, with the same import path.
+   Since 0.4.0. To keep an import anyway, as Python's tools do:
+   - `from m import x as x` (or `import m as m`): a redundant alias, the
+     typing convention ([PEP 484](https://peps.python.org/pep-0484/#stub-files))
+     for "imported on purpose";
+   - `# noqa: unused-import` on the name's line, or on the first line of
+     its statement for all of its names, as flake8 and ruff read a
+     [`# noqa`](https://docs.astral.sh/ruff/linters/#error-suppression).
 
 **`tests`**
 
-3. **`functions-in-imported-module`: a file that calls
+4. **`functions-in-imported-module`: a file that calls
    `__functions_in_module()` isn't imported.** In Mojo 1.2.0 that list is
    incomplete when its file is imported rather than built as the main file.
    A test file whose `main` is
@@ -30,7 +42,7 @@ two groups:
    [census's `scripts/test.sh`](https://github.com/morca-dev/census/blob/main/scripts/test.sh)
    does: it generates the main under `build/` (which customs skips), imports
    each `def test_*` by name, and checks the count each file runs.
-4. **`mojo-run-per-test`: no command runs `mojo run` on more than 3 test
+5. **`mojo-run-per-test`: no command runs `mojo run` on more than 3 test
    files.** Each `mojo run` compiles the library code the tests share again.
    In [morca-dev/census](https://github.com/morca-dev/census/issues/207),
    35 `mojo run -I src tests/test_*.mojo` took 665 s on a 16-core Linux
@@ -39,7 +51,7 @@ two groups:
    names the task, CI step or script, and the files it runs. See
    [How it reads tasks, workflows and scripts](#how-it-reads-tasks-workflows-and-scripts)
    for what it sees.
-5. **`mojo-build-per-test`: no command runs `mojo build` on more than 3
+6. **`mojo-build-per-test`: no command runs `mojo build` on more than 3
    test files.** Building each test file into a binary of its own costs what
    `mojo run` per file does (663 s against 665 s in census). It counts
    `mojo build` itself and a wrapper that passes its arguments on to it: a
@@ -48,8 +60,30 @@ two groups:
    Building several programs (pipelines, a CLI, a test's driver) isn't a
    finding: only test files count. Since 0.3.1.
 
-Every rule is `deny` unless [configured](#configuration): without a
-configuration, `imports` behaves as it did before the `tests` group.
+Every rule is `deny` unless [configured](#configuration).
+
+## `# noqa`
+
+A `# noqa` comment on an import's line allows the rules reported there,
+as [flake8](https://flake8.pycqa.org/en/latest/user/violations.html#in-line-ignoring-errors)
+and ruff read one: `# noqa` alone allows all of them, and
+`# noqa: NAME, NAME` only the rules or groups named
+(`# noqa: unused-import`, `# noqa: imports`). It's read anywhere in the
+comment, in any case. On the first line of a parenthesized import it covers
+every name in it; on a name's own line, that name. It works for
+`unused-import`, `import-through-reexport` and
+`functions-in-imported-module`, not for `import-cycle`: a cycle is fixed,
+or allowed for the whole project in the [configuration](#configuration).
+flake8's codes (`F401`) aren't customs's names, and allow nothing.
+
+```mojo
+from .copy import CopyIn                 # noqa: unused-import
+from arrow_mlake.arrow import (          # noqa: unused-import
+    bit_get,
+    bit_set,
+)
+from json.cpu import parse as parse      # kept: a redundant alias
+```
 
 ```text
 $ customs
@@ -58,7 +92,7 @@ src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -
     src/morca/_internal/web/page.mojo:8: from morca._internal.ui.layout import with_header_help
 src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows [import-through-reexport]
 ...
-customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files
+customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 106 unused imports, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files
 ```
 
 ## Usage
@@ -100,7 +134,7 @@ mojo-run-per-test-threshold = 3     # report a command that runs more test files
 mojo-build-per-test-threshold = 3   # report a command that builds more test files
 
 [tool.customs.lints]
-imports = "deny"                    # group: import-cycle, import-through-reexport
+imports = "deny"                    # group: import-cycle, import-through-reexport, unused-import
 tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test, mojo-build-per-test
 # The examples' tests are separate programs: they can't share a binary.
 mojo-run-per-test = "warn"          # a rule's own level wins over its group's
@@ -122,7 +156,7 @@ mojo-run-per-test = "warn"          # a rule's own level wins over its group's
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.3.1
+      - uses: magmalake/customs@v0.4.0
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -142,7 +176,7 @@ on each pull request, as a job their one required check waits for, as in
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.3.1
+      - uses: magmalake/customs@v0.4.0
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]
