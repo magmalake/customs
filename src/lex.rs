@@ -8,6 +8,13 @@ use std::collections::HashSet;
 /// `src` with every string literal and comment replaced by spaces. Newlines
 /// are kept, so line numbers still match the file.
 pub fn strip(src: &str) -> String {
+    strip_keeping_comments(src).0
+}
+
+/// [`strip`], and each comment it blanked, with its 1-based line.
+pub fn strip_keeping_comments(src: &str) -> (String, Vec<(usize, String)>) {
+    let mut comments = Vec::new();
+    let mut line = 1;
     let b: Vec<char> = src.chars().collect();
     let n = b.len();
     let mut out = String::with_capacity(src.len());
@@ -24,6 +31,7 @@ pub fn strip(src: &str) -> String {
             while j < n && b[j] != '\n' {
                 j += 1;
             }
+            comments.push((line, b[i..j].iter().collect()));
             blank(&mut out, &b[i..j]);
             i = j;
         } else if c == '"' || c == '\'' {
@@ -54,14 +62,74 @@ pub fn strip(src: &str) -> String {
                     j.min(n)
                 }
             };
+            line += b[i..end].iter().filter(|&&c| c == '\n').count();
             blank(&mut out, &b[i..end]);
             i = end;
         } else {
+            if c == '\n' {
+                line += 1;
+            }
             out.push(c);
             i += 1;
         }
     }
-    out
+    (out, comments)
+}
+
+/// What a `# noqa` comment allows on its line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Noqa {
+    /// `# noqa`: every rule.
+    All,
+    /// `# noqa: a, b`: these rules or groups, by name.
+    Names(Vec<String>),
+}
+
+impl Noqa {
+    /// Whether it allows a rule, by its name or its group's.
+    pub fn allows(&self, rule: &str, group: &str) -> bool {
+        match self {
+            Noqa::All => true,
+            Noqa::Names(ns) => ns.iter().any(|n| n == rule || n == group),
+        }
+    }
+}
+
+/// The `# noqa` in `comment` (a comment's text, from its `#`), as flake8
+/// and ruff read one: `# noqa` alone, or `# noqa: NAME, NAME`, anywhere in
+/// the comment and in any case. `None` without one.
+pub fn noqa(comment: &str) -> Option<Noqa> {
+    let low = comment.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = low[from..].find('#') {
+        let at = from + at;
+        from = at + 1;
+        let rest = low[at + 1..].trim_start();
+        let Some(rest) = rest.strip_prefix("noqa") else {
+            continue;
+        };
+        if rest.starts_with(|c: char| c == '_' || c == '-' || c.is_alphanumeric()) {
+            continue;
+        }
+        let Some(list) = rest.trim_start().strip_prefix(':') else {
+            return Some(Noqa::All);
+        };
+        let names: Vec<String> = list
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|w| !w.is_empty())
+            .take_while(|w| {
+                w.chars()
+                    .all(|c| c == '-' || c == '_' || c.is_alphanumeric())
+            })
+            .map(str::to_string)
+            .collect();
+        return Some(if names.is_empty() {
+            Noqa::All
+        } else {
+            Noqa::Names(names)
+        });
+    }
+    None
 }
 
 /// One name of a `from M import a as b`.
@@ -70,6 +138,11 @@ pub struct Name {
     pub name: String,
     /// What the importer calls it: `b`, or `a` without `as`.
     pub alias: String,
+    /// 1-based line the name is on (in a parenthesized list, its own).
+    pub line: usize,
+    /// `a as a`: the name kept on purpose, as Python's typing convention
+    /// marks an explicit re-export.
+    pub redundant: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +157,8 @@ pub enum What {
 pub struct Import {
     /// 1-based line of the `from` or `import`.
     pub line: usize,
+    /// 1-based line the statement ends on (the same, on one line).
+    pub end: usize,
     /// Inside a function or other block, not at the file's top level.
     pub nested: bool,
     /// The module as written, relative (`.x`) or not.
@@ -138,34 +213,45 @@ pub fn imports(stripped: &str) -> Vec<Import> {
                 None => (rest, ""),
             };
             if let Some(names) = after_keyword(rest, "import").filter(|_| is_module_path(module)) {
-                let mut names = names.trim_end().to_string();
-                if let Some(open) = names.strip_prefix('(') {
-                    let mut buf = open.to_string();
-                    while !buf.contains(')') && i + 1 < lines.len() {
+                // The list, a piece per line, each with its line.
+                let first = names.trim_end();
+                let mut segs: Vec<(String, usize)> = Vec::new();
+                if let Some(open) = first.strip_prefix('(') {
+                    segs.push((open.to_string(), start + 1));
+                    while !segs.last().is_some_and(|(s, _)| s.contains(')')) && i + 1 < lines.len()
+                    {
                         i += 1;
-                        buf.push(' ');
-                        buf.push_str(lines[i].trim());
+                        segs.push((lines[i].trim().to_string(), i + 1));
                     }
-                    names = buf.split(')').next().unwrap_or("").to_string();
+                    if let Some((s, _)) = segs.last_mut() {
+                        if let Some(close) = s.find(')') {
+                            s.truncate(close);
+                        }
+                    }
                 } else {
-                    while names.ends_with('\\') && i + 1 < lines.len() {
-                        names.pop();
+                    segs.push((first.to_string(), start + 1));
+                    while segs.last().is_some_and(|(s, _)| s.ends_with('\\')) && i + 1 < lines.len()
+                    {
+                        segs.last_mut().unwrap().0.pop();
                         i += 1;
-                        names.push(' ');
-                        names.push_str(lines[i].trim());
+                        segs.push((lines[i].trim().to_string(), i + 1));
                     }
                 }
-                let names: Vec<Name> = names
-                    .split(',')
-                    .filter_map(|p| name_and_alias(p.trim()))
-                    .filter(|(n, _)| n == "*" || is_ident(n))
-                    .map(|(n, a)| Name {
+                let names: Vec<Name> = segs
+                    .iter()
+                    .flat_map(|(s, ln)| s.split(',').map(move |p| (p, *ln)))
+                    .filter_map(|(p, ln)| name_and_alias(p.trim()).map(|na| (na, ln)))
+                    .filter(|((n, _), _)| n == "*" || is_ident(n))
+                    .map(|((n, a), ln)| Name {
+                        redundant: a.as_ref() == Some(&n),
                         alias: a.unwrap_or_else(|| n.clone()),
                         name: n,
+                        line: ln,
                     })
                     .collect();
                 out.push(Import {
                     line: start + 1,
+                    end: i + 1,
                     nested,
                     module: module.to_string(),
                     what: What::Names(names),
@@ -177,6 +263,7 @@ pub fn imports(stripped: &str) -> Vec<Import> {
                     if is_module_path(&m) && !m.starts_with('.') {
                         out.push(Import {
                             line: start + 1,
+                            end: start + 1,
                             nested,
                             module: m,
                             what: What::Module(alias),
@@ -210,6 +297,41 @@ pub fn defs(stripped: &str) -> HashSet<String> {
                     out.insert(name);
                 }
                 break;
+            }
+        }
+    }
+    out
+}
+
+/// The names `stripped` uses outside its import statements: each
+/// identifier that isn't an attribute (after a `.`), on a line that isn't
+/// part of one of `imports`.
+pub fn used(stripped: &str, imports: &[Import]) -> HashSet<String> {
+    let skip: HashSet<usize> = imports.iter().flat_map(|i| i.line..=i.end).collect();
+    let mut out = HashSet::new();
+    for (ln, line) in stripped.lines().enumerate() {
+        if skip.contains(&(ln + 1)) {
+            continue;
+        }
+        let cs: Vec<char> = line.chars().collect();
+        let mut j = 0;
+        while j < cs.len() {
+            let c = cs[j];
+            if c == '_' || c.is_alphabetic() {
+                let s = j;
+                while j < cs.len() && (cs[j] == '_' || cs[j].is_alphanumeric()) {
+                    j += 1;
+                }
+                let before = cs[..s].iter().rev().find(|c| !c.is_whitespace());
+                if before != Some(&'.') {
+                    out.insert(cs[s..j].iter().collect());
+                }
+            } else if c.is_ascii_digit() {
+                while j < cs.len() && (cs[j] == '_' || cs[j].is_alphanumeric()) {
+                    j += 1;
+                }
+            } else {
+                j += 1;
             }
         }
     }
@@ -313,6 +435,65 @@ mod tests {
         let mut v: Vec<_> = d.into_iter().collect();
         v.sort();
         assert_eq!(v, vec!["A", "K", "S", "T", "f", "h", "v"]);
+    }
+
+    #[test]
+    fn names_have_their_own_lines_and_imports_their_end() {
+        let is = imports(&strip(
+            "from m import (\n    a,\n    b as b,  c as d,\n)\nfrom n import x, \\\n    y\nimport q\n",
+        ));
+        let lines = |i: &Import| match &i.what {
+            What::Names(ns) => ns
+                .iter()
+                .map(|n| (n.alias.clone(), n.line, n.redundant))
+                .collect(),
+            What::Module(_) => vec![],
+        };
+        assert_eq!(
+            lines(&is[0]),
+            vec![
+                ("a".into(), 2, false),
+                ("b".into(), 3, true),
+                ("d".into(), 3, false)
+            ]
+        );
+        assert_eq!((is[0].line, is[0].end), (1, 4));
+        assert_eq!(
+            lines(&is[1]),
+            vec![("x".into(), 5, false), ("y".into(), 6, false)]
+        );
+        assert_eq!((is[1].line, is[1].end), (5, 6));
+        assert_eq!((is[2].line, is[2].end), (7, 7));
+    }
+
+    #[test]
+    fn noqa_as_flake8_reads_it() {
+        assert_eq!(noqa("# noqa"), Some(Noqa::All));
+        assert_eq!(noqa("#NOQA"), Some(Noqa::All));
+        assert_eq!(
+            noqa("# kept # noqa: unused-import, imports"),
+            Some(Noqa::Names(vec!["unused-import".into(), "imports".into()]))
+        );
+        assert_eq!(
+            noqa("# noqa:unused-import why"),
+            Some(Noqa::Names(vec!["unused-import".into(), "why".into()]))
+        );
+        assert_eq!(noqa("# noqa: F401"), Some(Noqa::Names(vec!["f401".into()])));
+        assert_eq!(noqa("# noqaxyz"), None);
+        assert_eq!(noqa("# see noqa"), None);
+        let (_, cs) = strip_keeping_comments("a = 1  # noqa\n\"\"\"x\ny\"\"\"\nb = '#' # two\n");
+        assert_eq!(
+            cs,
+            vec![(1, "# noqa".to_string()), (4, "# two".to_string())]
+        );
+    }
+
+    #[test]
+    fn used_names_leave_out_imports_and_attributes() {
+        let s = strip("from m import a, b\nimport q.r\nx = a + c.b\nq.r.f()\n# b\n\"b\"\n");
+        let u = used(&s, &imports(&s));
+        assert!(u.contains("a") && u.contains("c") && u.contains("q") && u.contains("x"));
+        assert!(!u.contains("b") && !u.contains("r") && !u.contains("f"));
     }
 
     #[test]

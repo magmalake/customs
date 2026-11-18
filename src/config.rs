@@ -9,7 +9,7 @@
 //! mojo-run-per-test-threshold = 3
 //!
 //! [tool.customs.lints]
-//! imports = "deny"
+//! imports = "deny"                 # import-cycle, import-through-reexport, unused-import
 //! tests = "deny"
 //! mojo-run-per-test = "warn"
 //! ```
@@ -43,14 +43,16 @@ impl Level {
 pub enum Rule {
     ImportCycle,
     ImportThroughReexport,
+    UnusedImport,
     FunctionsInImportedModule,
     MojoRunPerTest,
     MojoBuildPerTest,
 }
 
-pub const RULES: [Rule; 5] = [
+pub const RULES: [Rule; 6] = [
     Rule::ImportCycle,
     Rule::ImportThroughReexport,
+    Rule::UnusedImport,
     Rule::FunctionsInImportedModule,
     Rule::MojoRunPerTest,
     Rule::MojoBuildPerTest,
@@ -58,7 +60,14 @@ pub const RULES: [Rule; 5] = [
 
 /// The groups, each with its rules; both are `deny` unless set.
 pub const GROUPS: [(&str, &[Rule]); 2] = [
-    ("imports", &[Rule::ImportCycle, Rule::ImportThroughReexport]),
+    (
+        "imports",
+        &[
+            Rule::ImportCycle,
+            Rule::ImportThroughReexport,
+            Rule::UnusedImport,
+        ],
+    ),
     (
         "tests",
         &[
@@ -74,6 +83,7 @@ impl Rule {
         match self {
             Rule::ImportCycle => "import-cycle",
             Rule::ImportThroughReexport => "import-through-reexport",
+            Rule::UnusedImport => "unused-import",
             Rule::FunctionsInImportedModule => "functions-in-imported-module",
             Rule::MojoRunPerTest => "mojo-run-per-test",
             Rule::MojoBuildPerTest => "mojo-build-per-test",

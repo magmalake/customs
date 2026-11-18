@@ -17,6 +17,9 @@ Checks the Mojo project at PROJECT (default: .). Its rules, by group:
     import-through-reexport       each name imported from the module that
                                   defines it, not one that re-exports it (a
                                   package's __init__.mojo may re-export)
+    unused-import                 each imported name used in the file, outside
+                                  a package's __init__.mojo; `x as x` or a
+                                  `# noqa: unused-import` keeps one
   tests
     functions-in-imported-module  no import of a file that calls
                                   __functions_in_module()
@@ -28,7 +31,9 @@ Checks the Mojo project at PROJECT (default: .). Its rules, by group:
 Its modules are the .mojo files under PROJECT/src (or PROJECT, without a
 src); its other .mojo files (tests, examples, ...) are checked as importers.
 Levels and options are read from the [tool.customs] table of
-PROJECT/pixi.toml; every rule is `deny` unless set there or here.
+PROJECT/pixi.toml; every rule is `deny` unless set there or here. A
+`# noqa` comment on an import's line allows every rule on it but
+import-cycle; `# noqa: NAME, ...` only the rules or groups named.
 
   -I DIR         modules of another project, as `mojo build -I DIR`: names
                  imported from them are checked, they aren't
@@ -197,6 +202,7 @@ fn main() -> ExitCode {
         let (found, notes) = match rule {
             Rule::ImportCycle => (check::cycles(&repo), Vec::new()),
             Rule::ImportThroughReexport => check::reexports(&repo),
+            Rule::UnusedImport => (check::unused(&repo), Vec::new()),
             Rule::FunctionsInImportedModule => (check::functions_in_imported(&repo), Vec::new()),
             Rule::MojoRunPerTest => {
                 let f = run_found.take().expect("scanned");
@@ -241,6 +247,7 @@ fn main() -> ExitCode {
                     "import through a re-export",
                     "imports through a re-export",
                 ),
+                Rule::UnusedImport => plural(n, "unused import", "unused imports"),
                 Rule::FunctionsInImportedModule => plural(
                     n,
                     "import of a file that calls __functions_in_module()",
