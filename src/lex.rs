@@ -365,6 +365,189 @@ pub fn uses(stripped: &str, prefix: &str) -> Vec<(String, usize)> {
     out
 }
 
+/// One statement of a file, with the statements of its block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stmt {
+    /// 1-based line it starts on.
+    pub line: usize,
+    /// A simple statement, or a compound one's header without its `:`
+    /// (`while True`, `else`), on one line and trimmed.
+    pub text: String,
+    /// `if`, `for`, `def`... : a header, whose block is `body`.
+    pub compound: bool,
+    pub body: Vec<Stmt>,
+}
+
+/// The words that start a compound statement.
+const COMPOUND: [&str; 14] = [
+    "if", "elif", "else", "for", "while", "with", "try", "except", "finally", "def", "fn",
+    "struct", "trait", "match",
+];
+
+impl Stmt {
+    /// Its first word (`while`, `out.append`... up to a space or bracket),
+    /// after a `comptime` of `comptime if` or `comptime for`.
+    pub fn keyword(&self) -> &str {
+        first_word(&self.text)
+    }
+}
+
+fn first_word(s: &str) -> &str {
+    let s = s
+        .strip_prefix("comptime ")
+        .map(str::trim_start)
+        .filter(|r| COMPOUND.contains(&first_word(r)))
+        .unwrap_or(s);
+    let end = s
+        .find(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// The file's logical lines: a line, with the lines a bracket left open
+/// or a trailing `\` continues; each with its 1-based line and its indent.
+fn logical_lines(stripped: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut cur: Option<(usize, usize, String)> = None;
+    let mut depth = 0i32;
+    for (ln, raw) in stripped.lines().enumerate() {
+        let body = raw.trim();
+        if body.is_empty() && cur.is_none() {
+            continue;
+        }
+        let (start, indent, mut text) =
+            cur.take()
+                .unwrap_or((ln + 1, raw.len() - raw.trim_start().len(), String::new()));
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        for c in body.chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        let cont = body.ends_with('\\');
+        text.push_str(body.strip_suffix('\\').unwrap_or(body).trim_end());
+        if depth > 0 || cont {
+            cur = Some((start, indent, text));
+        } else {
+            depth = 0;
+            out.push((start, indent, text));
+        }
+    }
+    out.extend(cur);
+    out
+}
+
+/// `s` cut at each `sep` outside brackets.
+fn split_top(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            c if c == sep && depth == 0 => {
+                out.push(&s[from..i]);
+                from = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[from..]);
+    out
+}
+
+/// `s` cut at each `,` outside brackets.
+pub fn split_top_commas(s: &str) -> Vec<&str> {
+    split_top(s, ',')
+}
+
+/// Where a compound statement's header ends: its first `:` outside
+/// brackets (not a `:=`).
+fn header_colon(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let b = s.as_bytes();
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 && b.get(i + 1) != Some(&b'=') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The statements of `stripped` (a file through [`strip`]), each compound
+/// one with its block: the logical lines indented under it, or what
+/// follows its `:` on the same line (`if k == last: break`). Simple
+/// statements on one line are cut at `;`. A scanner's view, not a parse:
+/// a line it can't place goes to the block above it.
+pub fn statements(stripped: &str) -> Vec<Stmt> {
+    // Each statement with its indent, a compound one's inline body as
+    // statements one deeper.
+    let mut flat: Vec<(usize, Stmt)> = Vec::new();
+    for (line, indent, text) in logical_lines(stripped) {
+        let simple = |s: &str| Stmt {
+            line,
+            text: s.trim().to_string(),
+            compound: false,
+            body: Vec::new(),
+        };
+        let colon = COMPOUND
+            .contains(&first_word(&text))
+            .then(|| header_colon(&text))
+            .flatten();
+        match colon {
+            Some(at) => {
+                flat.push((
+                    indent,
+                    Stmt {
+                        line,
+                        text: text[..at].trim().to_string(),
+                        compound: true,
+                        body: Vec::new(),
+                    },
+                ));
+                for s in split_top(&text[at + 1..], ';') {
+                    if !s.trim().is_empty() {
+                        flat.push((indent + 1, simple(s)));
+                    }
+                }
+            }
+            None => {
+                for s in split_top(&text, ';') {
+                    if !s.trim().is_empty() {
+                        flat.push((indent, simple(s)));
+                    }
+                }
+            }
+        }
+    }
+    fn block(
+        flat: &mut std::iter::Peekable<std::vec::IntoIter<(usize, Stmt)>>,
+        above: Option<usize>,
+    ) -> Vec<Stmt> {
+        let mut out: Vec<Stmt> = Vec::new();
+        while let Some((indent, _)) = flat.peek() {
+            if above.is_some_and(|a| *indent <= a) {
+                break;
+            }
+            let (indent, mut s) = flat.next().unwrap();
+            if s.compound {
+                s.body = block(flat, Some(indent));
+            }
+            out.push(s);
+        }
+        out
+    }
+    block(&mut flat.into_iter().peekable(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +688,41 @@ mod tests {
             uses(&s, "calls"),
             vec![("x".to_string(), 2), ("w".to_string(), 6)]
         );
+    }
+
+    #[test]
+    fn statements_and_their_blocks() {
+        let s = statements(&strip(
+            "def f(\n    a: Int,\n) -> Int:\n    while True:  # x\n        out.append(\n            a)\n        if a: break\n        x = 1; y = \\\n            2\n    comptime if a:\n        pass\n    else:\n        s = \"a: b\"\n",
+        ));
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            (s[0].line, s[0].text.as_str()),
+            (1, "def f( a: Int, ) -> Int")
+        );
+        let body = &s[0].body;
+        assert_eq!(body.len(), 3);
+        assert_eq!(
+            (body[0].text.as_str(), body[0].keyword()),
+            ("while True", "while")
+        );
+        let w: Vec<(usize, &str, bool)> = body[0]
+            .body
+            .iter()
+            .map(|b| (b.line, b.text.as_str(), b.compound))
+            .collect();
+        assert_eq!(
+            w,
+            vec![
+                (5, "out.append( a)", false),
+                (7, "if a", true),
+                (8, "x = 1", false),
+                (8, "y = 2", false),
+            ]
+        );
+        assert_eq!(body[0].body[1].body[0].text, "break");
+        assert_eq!(body[1].keyword(), "if");
+        assert_eq!(body[2].text, "else");
+        assert_eq!(body[2].body.len(), 1);
     }
 }

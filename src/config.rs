@@ -11,6 +11,7 @@
 //! [tool.customs.lints]
 //! imports = "deny"                 # import-cycle, import-through-reexport, unused-import
 //! tests = "deny"
+//! compiler-bugs = "deny"
 //! mojo-run-per-test = "warn"
 //! ```
 
@@ -47,19 +48,23 @@ pub enum Rule {
     FunctionsInImportedModule,
     MojoRunPerTest,
     MojoBuildPerTest,
+    AppendBeforeLoopExit,
+    WorkBeforeCountedExit,
 }
 
-pub const RULES: [Rule; 6] = [
+pub const RULES: [Rule; 8] = [
     Rule::ImportCycle,
     Rule::ImportThroughReexport,
     Rule::UnusedImport,
     Rule::FunctionsInImportedModule,
     Rule::MojoRunPerTest,
     Rule::MojoBuildPerTest,
+    Rule::AppendBeforeLoopExit,
+    Rule::WorkBeforeCountedExit,
 ];
 
-/// The groups, each with its rules; both are `deny` unless set.
-pub const GROUPS: [(&str, &[Rule]); 2] = [
+/// The groups, each with its rules; each is `deny` unless set.
+pub const GROUPS: [(&str, &[Rule]); 3] = [
     (
         "imports",
         &[
@@ -76,6 +81,12 @@ pub const GROUPS: [(&str, &[Rule]); 2] = [
             Rule::MojoBuildPerTest,
         ],
     ),
+    // Each tied to a Mojo compiler bug (`crate::bugs::BUGS`), and deleted
+    // when it's fixed.
+    (
+        "compiler-bugs",
+        &[Rule::AppendBeforeLoopExit, Rule::WorkBeforeCountedExit],
+    ),
 ];
 
 impl Rule {
@@ -87,6 +98,8 @@ impl Rule {
             Rule::FunctionsInImportedModule => "functions-in-imported-module",
             Rule::MojoRunPerTest => "mojo-run-per-test",
             Rule::MojoBuildPerTest => "mojo-build-per-test",
+            Rule::AppendBeforeLoopExit => "append-before-loop-exit",
+            Rule::WorkBeforeCountedExit => "work-before-counted-exit",
         }
     }
 
@@ -138,6 +151,9 @@ pub struct Config {
     pub threshold: usize,
     /// `mojo-build-per-test` reports a command that builds more than this.
     pub build_threshold: usize,
+    /// `mojo-version`: the compiler the compiler-bugs rules check for,
+    /// over the project's pins, with its line.
+    pub mojo_version: Option<(String, usize)>,
 }
 
 impl Default for Config {
@@ -147,6 +163,7 @@ impl Default for Config {
             cli: Levels::default(),
             threshold: DEFAULT_THRESHOLD,
             build_threshold: DEFAULT_THRESHOLD,
+            mojo_version: None,
         }
     }
 }
@@ -213,6 +230,19 @@ impl Config {
                     } else {
                         c.build_threshold = n;
                     }
+                }
+                [opt] if opt == "mojo-version" => {
+                    let v = e
+                        .value
+                        .as_str()
+                        .filter(|v| crate::version::Version::parse(v).is_some())
+                        .ok_or_else(|| {
+                            bad(
+                                e.line,
+                                "`mojo-version` is a version, as \"1.3.0.dev2026111805\"".into(),
+                            )
+                        })?;
+                    c.mojo_version = Some((v.to_string(), e.line));
                 }
                 _ => return Err(bad(e.line, format!("no option `{}`", rest.join(".")))),
             }
@@ -295,6 +325,20 @@ mod tests {
     }
 
     #[test]
+    fn the_compiler_bugs_group() {
+        let c = with("[tool.customs.lints]\ncompiler-bugs = \"warn\"\n").unwrap();
+        assert_eq!(Rule::AppendBeforeLoopExit.group(), "compiler-bugs");
+        assert_eq!(c.level(Rule::AppendBeforeLoopExit), Level::Warn);
+        assert_eq!(c.level(Rule::UnusedImport), Level::Deny);
+        let c = with(
+            "[tool.customs.lints]\ncompiler-bugs = \"warn\"\nappend-before-loop-exit = \"allow\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.level(Rule::AppendBeforeLoopExit), Level::Allow);
+        assert_eq!(c.level(Rule::WorkBeforeCountedExit), Level::Warn);
+    }
+
+    #[test]
     fn unknown_names_and_levels_are_errors() {
         let e = with("[tool.customs.lints]\nmojo-run = \"warn\"\n").unwrap_err();
         assert!(
@@ -308,5 +352,9 @@ mod tests {
         assert!(e.to_string().contains("no option `threshold`"), "{e}");
         let e = with("[tool.customs]\nmojo-run-per-test-threshold = \"3\"\n").unwrap_err();
         assert!(e.to_string().contains("whole number"), "{e}");
+        let e = with("[tool.customs]\nmojo-version = \">=1.2\"\n").unwrap_err();
+        assert!(e.to_string().contains("`mojo-version` is a version"), "{e}");
+        let c = with("[tool.customs]\nmojo-version = \"1.3.0.dev2026111805\"\n").unwrap();
+        assert_eq!(c.mojo_version, Some(("1.3.0.dev2026111805".into(), 2)));
     }
 }
