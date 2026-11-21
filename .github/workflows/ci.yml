@@ -27,7 +27,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/clean/src/p" "$RUNNER_TEMP/cycle/src/p"
           : > "$RUNNER_TEMP/clean/src/p/__init__.mojo"
           printf 'def f(): pass\n' > "$RUNNER_TEMP/clean/src/p/a.mojo"
-          printf 'from p.a import f\n' > "$RUNNER_TEMP/clean/src/p/b.mojo"
+          printf 'from p.a import f\ndef g(): f()\n' > "$RUNNER_TEMP/clean/src/p/b.mojo"
           : > "$RUNNER_TEMP/cycle/src/p/__init__.mojo"
           printf 'from p.b import g\ndef f(): pass\n' > "$RUNNER_TEMP/cycle/src/p/a.mojo"
           printf 'from p.a import f\ndef g(): pass\n' > "$RUNNER_TEMP/cycle/src/p/b.mojo"
