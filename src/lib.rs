@@ -13,3 +13,4 @@ pub mod repo;
 pub mod runs;
 pub mod shell;
 pub mod toml;
+pub mod version;

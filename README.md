@@ -63,9 +63,11 @@ on [magmalake.org/s/customs](https://magmalake.org/s/customs).
 
 **`compiler-bugs`**
 
-Code that a known Mojo compiler bug compiles wrong. Each rule names its
-upstream issue and the versions it's in, in its findings, and goes when the
-issue is fixed. Since 0.5.0.
+Code that a known Mojo compiler bug compiles wrong. Each rule names the
+versions the bug is in, and its upstream issue or the version that fixed
+it, in its findings; it runs only for a compiler that has the bug (see
+[Which compiler](#which-compiler)), and goes when no one builds with one.
+Since 0.5.0.
 
 7. **`append-before-loop-exit`: no `while True:` loop that appends before
    its exit test.** Mojo 1.3.0.dev2026111905 and later, at the default
@@ -114,11 +116,35 @@ issue is fixed. Since 0.5.0.
    at `n`. A List or a String comes out one short, a store through an index
    is lost. It needs a signed integer stepped by a constant (by 1 for `==`)
    after the test, and an `==`, `<` or `>` test against a bound the loop
-   doesn't change. 1.3.0.dev2026111905 fixed it, and with it brought #7716.
-   Not filed upstream yet. Test at the top (`while k <= n:`, or a `for` over
-   a `range`), or do the first item before the loop and `while k != last:`.
+   doesn't change; or a key made anew from the last one (`k = k.next()`,
+   `k = Day(k.n + 1)`), which can come out the same. 1.3.0.dev2026111905
+   fixed it (and brought #7716), so it has no upstream issue. Test at the
+   top (`while k <= n:`, or a `for` over a `range`), or do the first item
+   before the loop and `while k != last:`.
 
 Every rule is `deny` unless [configured](#configuration).
+
+### Which compiler
+
+The `compiler-bugs` rules check for the compiler the project builds with:
+each exact pin of `mojo-compiler` (else of `mojo`) in its `pixi.toml`, as `"==X"`, `"=X"` or `"X"` (or `{ version = ... }`), in
+`[dependencies]`, `[package.host-dependencies]` (and `build`, `run`),
+`[feature.*.dependencies]` and their `target.*` forms. A rule runs when any
+of them has its bug, so a project with a stable and a nightly feature is
+checked for both. When it can't tell (a range as `">=1.2.0"`, `"*"`, no pin,
+no `pixi.toml`), every rule runs. `--mojo-version X`, or `mojo-version =
+"X"` under `[tool.customs]`, says which instead. With `-v` it prints the
+versions and where it found them; the summary line names a rule it didn't
+run for the version, so a pass isn't taken for a check:
+
+```text
+customs: Mojo 1.3.0.dev2026111805 (pixi.toml:19 [dependencies], and 5 more), for the compiler-bugs rules
+customs: 269 modules, 406 files: ..., 1 `while True:` loop that counts to its exit test after other work, append-before-loop-exit not checked: Mojo 1.3.0.dev2026111805 doesn't have its bug
+```
+
+Versions are ordered as Mojo's are: a nightly `1.3.0.dev2026111805` comes
+after `1.2.0` and before the `1.3.0` release, and nightlies by their
+stamps.
 
 ## `# noqa`
 
@@ -157,7 +183,7 @@ customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-expor
 ## Usage
 
 ```text
-customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
+customs [-I DIR]... [-A|-W|-D NAME]... [--mojo-version X] [-v] [PROJECT]
 ```
 
 - **PROJECT** (default `.`): its modules are the `.mojo` files under
@@ -171,6 +197,8 @@ customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
   imported from them are checked; their own imports aren't reported.
 - **`-A NAME`, `-W NAME`, `-D NAME`**: allow (don't check), warn or deny a
   rule or a group, over the configuration file.
+- **`--mojo-version X`**: the Mojo the `compiler-bugs` rules check for,
+  over the project's pins ([Which compiler](#which-compiler)).
 - **`-v`**: also notes what it can't place: each name that isn't found at
   the top level of the module it's imported from (a definition inside a
   `comptime if`, or a local variable that shadows a module's name), each
@@ -193,6 +221,7 @@ group, and each rule's numbers as flat kebab-case keys named after it.
 [tool.customs]
 mojo-run-per-test-threshold = 3     # report a command that runs more test files
 mojo-build-per-test-threshold = 3   # report a command that builds more test files
+mojo-version = "1.3.0.dev2026111805"  # the compiler-bugs rules check for this Mojo, not pixi.toml's pins
 
 [tool.customs.lints]
 imports = "deny"                    # group: import-cycle, import-through-reexport, unused-import
@@ -366,8 +395,9 @@ compiler turns into a counted loop. A `while True:` loop is reported when:
 - one side is a name `k` declared before the loop or a parameter (or a
   `var cur = k` made in the loop before the test), that the loop changes
   only after the test, once, at its own level, with `k += c`, `k -= c` or
-  `k = k + c` (`c` a whole number, 1 for `==`); not declared `UInt...`,
-  nor made by a struct's constructor;
+  `k = k + c` (`c` a whole number, 1 for `==`), not declared `UInt...`
+  nor made by a struct's constructor; or with `k = ...` made from `k`
+  (`k = k.next()`, `k = Day(k.n + 1)`), of any type;
 - the other side is something the loop doesn't assign;
 - something comes before the test.
 
@@ -376,8 +406,10 @@ It's silent when a number declared outside the loop (`var total = 0`, an
 loop as it is. It's a note with `-v` when the bound is a call (`len(q)`),
 when the loop makes a value with a destructor before the test (`var tmp =
 List[Int]()`), or when an `if` on the counter comes first: each kept a
-loop right in a test, and not always. A struct that holds a counter
-(`k = Day(k.n + 1)`) can be compiled wrong too; it isn't reported.
+loop right in a test, and not always. A key made anew was compiled wrong
+when it started from a constant (`var k = Day(1)`), and right from a
+parameter; as the rule runs only for the compilers with the bug, both are
+reported.
 
 ## Building
 

@@ -7,9 +7,10 @@ use customs::check::{self, Finding};
 use customs::config::{Config, Level, Rule, RULES};
 use customs::repo::{self, Repo};
 use customs::runs;
+use customs::version::{self, Compiler, Version};
 
 const USAGE: &str = "\
-usage: customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
+usage: customs [-I DIR]... [-A|-W|-D NAME]... [--mojo-version X] [-v] [PROJECT]
 
 Checks the Mojo project at PROJECT (default: .). Its rules, by group:
 
@@ -48,6 +49,10 @@ named.
   -A NAME        allow (don't check) a rule or a group
   -W NAME        warn: report it, but don't fail
   -D NAME        deny: report it and fail
+  --mojo-version X
+                 the Mojo the compiler-bugs rules check for, over the exact
+                 pins of mojo-compiler (or mojo) in pixi.toml; a rule runs
+                 when one of them has its bug, or when it's unknown
   -v, --verbose  also note what it can't place: names not found in the module
                  they're imported from, `mojo run`s whose files it can't tell,
                  calls that may grow a container before a loop's exit test
@@ -63,6 +68,7 @@ struct Args {
     project: PathBuf,
     includes: Vec<PathBuf>,
     levels: Vec<(String, Level)>,
+    mojo_version: Option<String>,
     verbose: bool,
 }
 
@@ -71,6 +77,7 @@ fn parse() -> Result<Option<Args>, String> {
         project: PathBuf::from("."),
         includes: Vec::new(),
         levels: Vec::new(),
+        mojo_version: None,
         verbose: false,
     };
     let mut project = None;
@@ -101,6 +108,12 @@ fn parse() -> Result<Option<Args>, String> {
                 return Ok(None);
             }
             "-v" | "--verbose" => args.verbose = true,
+            "--mojo-version" => {
+                args.mojo_version = Some(it.next().ok_or("--mojo-version needs a version")?)
+            }
+            s if s.starts_with("--mojo-version=") => {
+                args.mojo_version = Some(s["--mojo-version=".len()..].to_string())
+            }
             "-I" => args
                 .includes
                 .push(PathBuf::from(it.next().ok_or("-I needs a directory")?)),
@@ -115,6 +128,13 @@ fn parse() -> Result<Option<Args>, String> {
     }
     if let Some(p) = project {
         args.project = p;
+    }
+    if let Some(v) = &args.mojo_version {
+        if Version::parse(v).is_none() {
+            return Err(format!(
+                "--mojo-version {v}: not a version, as 1.3.0.dev2026111805"
+            ));
+        }
     }
     for d in std::iter::once(&args.project).chain(&args.includes) {
         if !d.is_dir() {
@@ -204,9 +224,26 @@ fn main() -> ExitCode {
         Some((r, b)) => (Some(r), Some(b)),
         None => (None, None),
     };
+    // The compiler the compiler-bugs rules check for.
+    let compiler = match (&args.mojo_version, &config.mojo_version) {
+        (Some(v), _) => Compiler::given(v, "--mojo-version"),
+        (None, Some((v, line))) => {
+            Compiler::given(v, &format!("pixi.toml:{line} [tool.customs] mojo-version"))
+        }
+        (None, None) => Some(version::project(&args.project)),
+    }
+    .expect("a version, checked");
+    let mut skipped: Vec<Rule> = Vec::new();
     for rule in RULES {
         if !on(rule) {
             continue;
+        }
+        if rule.group() == "compiler-bugs" {
+            let b = bugs::bug(rule);
+            if !compiler.exposed(b.from, b.fixed_in) {
+                skipped.push(rule);
+                continue;
+            }
         }
         let (found, notes) = match rule {
             Rule::ImportCycle => (check::cycles(&repo), Vec::new()),
@@ -247,7 +284,35 @@ fn main() -> ExitCode {
         .filter(|f| f.local && f.module.is_some())
         .count();
     let files = repo.files.iter().filter(|f| f.local).count();
-    let counts: Vec<String> = results
+    if args.verbose {
+        match &compiler {
+            Compiler::Pinned(pins) => {
+                // Each version once, with its first pin and how many more.
+                let mut by: Vec<(String, &str, usize)> = Vec::new();
+                for (v, at) in pins {
+                    match by.iter_mut().find(|(w, _, _)| *w == v.to_string()) {
+                        Some(e) => e.2 += 1,
+                        None => by.push((v.to_string(), at, 0)),
+                    }
+                }
+                let from: Vec<String> = by
+                    .iter()
+                    .map(|(v, at, more)| match more {
+                        0 => format!("{v} ({at})"),
+                        n => format!("{v} ({at}, and {n} more)"),
+                    })
+                    .collect();
+                eprintln!(
+                    "customs: Mojo {}, for the compiler-bugs rules",
+                    from.join(", ")
+                );
+            }
+            Compiler::Unknown(why) => eprintln!(
+                "customs: Mojo version unknown ({why}): every compiler-bugs rule is checked"
+            ),
+        }
+    }
+    let mut counts: Vec<String> = results
         .iter()
         .map(|(rule, found, _)| {
             let n = found.len();
@@ -300,6 +365,19 @@ fn main() -> ExitCode {
             }
         })
         .collect();
+    if !skipped.is_empty() {
+        let names: Vec<&str> = skipped.iter().map(|r| r.name()).collect();
+        counts.push(format!(
+            "{} not checked: Mojo {} doesn't have {}",
+            names.join(" and "),
+            compiler.versions(),
+            if skipped.len() == 1 {
+                "its bug"
+            } else {
+                "their bugs"
+            }
+        ));
+    }
     eprintln!(
         "customs: {modules} modules, {files} files: {}",
         if counts.is_empty() {

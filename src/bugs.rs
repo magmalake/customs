@@ -18,7 +18,11 @@
 //!    loop that steps an `Int` by a constant and leaves on `if k == n:
 //!    break` into a counted loop tested at the top, at every optimization
 //!    level, without checking that the test came first: what comes before
-//!    the test runs one time too few. Not filed upstream yet.
+//!    the test runs one time too few. Fixed in 1.3.0.dev2026111905, before
+//!    an issue was filed.
+//!
+//! Each runs only when the project's compiler is in its bug's range
+//! ([`crate::version`]).
 //!
 //! A `# noqa: RULE` on the `while True:` line allows a rule there.
 
@@ -32,8 +36,12 @@ use crate::repo::{File, Repo};
 /// A rule's compiler bug: the upstream issue, and the versions it's in.
 pub struct Bug {
     pub rule: Rule,
-    /// The upstream issue's URL; `None` until it's filed.
+    /// The upstream issue's URL, if there is one.
     pub issue: Option<&'static str>,
+    /// The first version with the bug.
+    pub from: &'static str,
+    /// The first version without it again; `None` while it isn't fixed.
+    pub fixed_in: Option<&'static str>,
     /// As a finding says it: "Mojo VERSIONS miscompile...".
     pub versions: &'static str,
 }
@@ -42,20 +50,30 @@ pub const BUGS: [Bug; 2] = [
     Bug {
         rule: Rule::AppendBeforeLoopExit,
         issue: Some("https://github.com/modular/modular/issues/7716"),
+        from: "1.3.0.dev2026111905",
+        // Not fixed yet (the fix is modular/modular#7725): once a build has
+        // it, `Some("<that version>")`, and `versions` to match.
+        fixed_in: None,
         versions: "1.3.0.dev2026111905 and later",
     },
     Bug {
         rule: Rule::WorkBeforeCountedExit,
-        // Not filed yet: its URL goes here, as `Some("https://...")`.
+        // No issue: it was fixed before one was filed.
         issue: None,
+        from: "1.2.0",
+        fixed_in: Some("1.3.0.dev2026111905"),
         versions: "1.2.0 to 1.3.0.dev2026111805 (with `==`, 1.3.0.dev2026111105 to 2026111805)",
     },
 ];
 
 impl Bug {
-    /// The issue's URL, or that there's none yet.
-    pub fn cite(&self) -> &'static str {
-        self.issue.unwrap_or("no upstream issue yet")
+    /// The issue's URL, or the version that fixed it.
+    pub fn cite(&self) -> String {
+        match (self.issue, self.fixed_in) {
+            (Some(url), _) => url.to_string(),
+            (None, Some(v)) => format!("fixed in {v}"),
+            (None, None) => "not filed upstream".to_string(),
+        }
     }
 }
 
@@ -302,6 +320,7 @@ fn check_loop(c: &mut Ctx, lp: &Stmt) {
     }
     let test = &body[head];
     let bug = bug(r);
+    let cite = bug.cite();
     let mut local: HashSet<String> = HashSet::new();
     let mut reported = false;
     for s in &body[..head] {
@@ -330,7 +349,7 @@ fn check_loop(c: &mut Ctx, lp: &Stmt) {
                         line: lp.line,
                         message: format!(
                             "this `{}:` loop appends to `{name}` before its exit test: Mojo {} miscompile it at the default optimization level, losing or shifting elements and writing freed memory ({}); append the first one before the loop and test at the top (`while k != last:`), or loop with `for`",
-                            lp.text, bug.versions, bug.cite()
+                            lp.text, bug.versions, cite
                         ),
                         detail: vec![show(c.f, st), show(c.f, test)],
                     });
@@ -346,7 +365,7 @@ fn check_loop(c: &mut Ctx, lp: &Stmt) {
                         line: st.line,
                         message: format!(
                             "append-before-loop-exit: `{name}.append` before the exit test of the `{}:` loop on line {}, {why}, which hasn't been seen to miscompile ({})",
-                            lp.text, lp.line, bug.cite()
+                            lp.text, lp.line, cite
                         ),
                         detail: vec![],
                     });
@@ -358,7 +377,7 @@ fn check_loop(c: &mut Ctx, lp: &Stmt) {
                         line: st.line,
                         message: format!(
                             "append-before-loop-exit: can't tell whether `{call}(...)` grows a container before the exit test of the `{}:` loop on line {} ({})",
-                            lp.text, lp.line, bug.cite()
+                            lp.text, lp.line, cite
                         ),
                         detail: vec![],
                     });
@@ -595,6 +614,7 @@ fn declared_type(func: Option<&Stmt>, before: usize, name: &str) -> Option<Optio
             .take_while(|c| *c == '_' || *c == '.' || c.is_alphanumeric())
             .collect();
         if value[callee.len()..].starts_with(['(', '['])
+            && !callee.contains('.')
             && callee.starts_with(|c: char| c.is_ascii_uppercase())
         {
             return Some(Some(callee));
@@ -686,6 +706,8 @@ enum Counted {
         v: String,
         op: &'static str,
         other: String,
+        /// Stepped by making a new value (`k = k.next()`), not by a number.
+        remade: bool,
     },
     Unsure(String),
 }
@@ -762,16 +784,32 @@ fn counted(lp: &Stmt, func: Option<&Stmt>) -> Option<Counted> {
         if at == test {
             continue;
         }
-        let Some(c) = top_assign(at).and_then(|(t, o, val)| step(&t, &o, &val, &v)) else {
+        let Some((t, o, val)) = top_assign(at) else {
             continue;
         };
-        if op == "==" && c.trim_start_matches('0') != "1" {
+        // `k += 1`; or, for a key that isn't a number, `k = k.next()` or
+        // `k = Day(k.n + 1)`: a new value made from the old one.
+        let by = step(&t, &o, &val, &v);
+        let remade = by.is_none()
+            && t == v
+            && o == "="
+            && val
+                .split(|c: char| !(c == '_' || c.is_alphanumeric()))
+                .any(|w| w == v);
+        if by.is_none() && !remade {
+            continue;
+        }
+        if op == "=="
+            && by
+                .as_ref()
+                .is_some_and(|c| c.trim_start_matches('0') != "1")
+        {
             continue;
         }
         let Some(ty) = declared_type(func, lp.line, &v) else {
             continue;
         };
-        if signed_int(&ty) == Some(false) {
+        if by.is_some() && signed_int(&ty) == Some(false) {
             continue;
         }
         // The other side: unchanged by the loop.
@@ -867,6 +905,7 @@ fn counted(lp: &Stmt, func: Option<&Stmt>) -> Option<Counted> {
             v,
             op,
             other: other.clone(),
+            remade,
         });
     }
     None
@@ -885,6 +924,7 @@ fn walk_counted(c: &mut Ctx, stmts: &[Stmt], func: Option<&Stmt>) {
                     v,
                     op,
                     other,
+                    remade,
                 }) => {
                     let st = &s.body[step].text;
                     let down = st.contains("-=") || st.contains(&format!("= {v} -"));
@@ -893,11 +933,16 @@ fn walk_counted(c: &mut Ctx, stmts: &[Stmt], func: Option<&Stmt>) {
                         ("==", true) => format!("`while {v} >= {other}:`"),
                         _ => "a `while` on the bound".to_string(),
                     };
+                    let fix = if remade {
+                        format!("do the first item before the loop and `while {v} != {other}:`")
+                    } else {
+                        format!("test at the top ({top}, or a `for` over a `range`), or do the first item before the loop and `while {v} != last:`")
+                    };
                     c.found.insert(Finding {
                         file: c.f.display.clone(),
                         line: s.line,
                         message: format!(
-                            "this `{}:` loop steps `{v}` and leaves on `{v} {op} {other}` after other work: Mojo {} compile it as a loop tested at the top, at every optimization level, so the work before the test runs one time too few ({}); test at the top ({top}, or a `for` over a `range`), or do the first item before the loop and `while {v} != last:`",
+                            "this `{}:` loop steps `{v}` and leaves on `{v} {op} {other}` after other work: Mojo {} compile it as a loop tested at the top, at every optimization level, so the work before the test runs one time too few ({}); {fix}",
                             s.text, bug.versions, bug.cite()
                         ),
                         detail: vec![show(c.f, &s.body[work]), show(c.f, &s.body[test]), show(c.f, &s.body[step])],
@@ -1126,6 +1171,20 @@ mod tests {
             let src = format!("def f(n: Int):\n    {decl}\n    while True:\n        out.append(k)\n        if k == n:\n            break\n        k += 1\n");
             assert_eq!(counted_lines(&src), (vec![], vec![]), "{decl}");
         }
+    }
+
+    #[test]
+    fn a_key_made_anew_from_the_last_one() {
+        // morca's `parse_keys`, and a struct around an `Int`.
+        let src = "def f(first: Day, last: Day) -> List[Day]:\n    var out = List[Day]()\n    var k = first.copy()\n    while True:\n        out.append(k.copy())\n        if k == last:\n            break\n        k = k.next()\n    return out^\n";
+        assert_eq!(counted_lines(src), (vec![4], vec![]));
+        let src = "def f(n: Int):\n    var k = Day(1)\n    var end = Day(n)\n    while True:\n        out.append(k.copy())\n        if k == end:\n            break\n        k = Day(k.n + 1)\n";
+        assert_eq!(counted_lines(src), (vec![4], vec![]));
+        // Not made from the last one; reassigned twice.
+        let src = "def f(n: Int):\n    var k = Day(1)\n    while True:\n        out.append(1)\n        if k == n:\n            break\n        k = Day(2)\n";
+        assert_eq!(counted_lines(src), (vec![], vec![]));
+        let src = "def f(n: Int):\n    var k = Day(1)\n    while True:\n        out.append(1)\n        if k == n:\n            break\n        k = k.next()\n        k = k.next()\n";
+        assert_eq!(counted_lines(src), (vec![], vec![]));
     }
 
     #[test]

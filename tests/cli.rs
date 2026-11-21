@@ -713,11 +713,14 @@ fn noqa_allows_a_reexport_but_not_a_cycle() {
     );
 }
 
+const PIN_1905: &str = "[dependencies]\nmojo = \"==1.3.0.dev2026111905\"\n";
+
 const KEYS: &str = "def parse_keys(first: Day, last: Day) -> List[Day]:\n    var out = List[Day]()\n    var k = first.copy()\n    while True:\n        out.append(k.copy())\n        if k == last:\n            break\n        k = k.next()\n    return out^\n\n\ndef fixed(first: Day, last: Day) -> List[Day]:\n    var out = List[Day]()\n    var k = first.copy()\n    out.append(k.copy())\n    while k != last:\n        k = k.next()\n        out.append(k.copy())\n    return out^\n";
 
 #[test]
 fn a_while_true_loop_that_appends_before_its_exit_test() {
     let d = project(&[
+        ("pixi.toml", PIN_1905),
         ("src/p/__init__.mojo", ""),
         ("src/p/key.mojo", KEYS),
         (
@@ -766,7 +769,7 @@ fn a_while_true_loop_that_appends_before_its_exit_test() {
     assert!(r.err.contains("before its exit test (warn)"), "{}", r.err);
     fs::write(
         d.join("pixi.toml"),
-        "[tool.customs.lints]\ncompiler-bugs = \"allow\"\n",
+        format!("{PIN_1905}[tool.customs.lints]\ncompiler-bugs = \"allow\"\n"),
     )
     .unwrap();
     let r = run_all(&d, &[]);
@@ -795,6 +798,10 @@ fn github_annotation_of_a_compiler_bug() {
 fn a_while_true_loop_that_counts_to_its_exit_test_after_other_work() {
     let d = project(&[
         (
+            "pixi.toml",
+            "[dependencies]\nmojo-compiler = \"==1.3.0.dev2026111805\"\n",
+        ),
+        (
             "src/count.mojo",
             "def total(n: Int) -> Int:\n    var seen = List[Int](length=1, fill=0)\n    var k = 1\n    while True:\n        seen[0] += k\n        if k == n:\n            break\n        k += 1\n    return seen[0]\n\n\ndef fixed(n: Int) -> Int:\n    var seen = 0\n    for k in range(1, n + 1):\n        seen += k\n    return seen\n",
         ),
@@ -809,7 +816,7 @@ fn a_while_true_loop_that_counts_to_its_exit_test_after_other_work() {
     assert_eq!(
         lines,
         vec![
-            "src/count.mojo:4: this `while True:` loop steps `k` and leaves on `k == n` after other work: Mojo 1.2.0 to 1.3.0.dev2026111805 (with `==`, 1.3.0.dev2026111105 to 2026111805) compile it as a loop tested at the top, at every optimization level, so the work before the test runs one time too few (no upstream issue yet); test at the top (`while k <= n:`, or a `for` over a `range`), or do the first item before the loop and `while k != last:` [work-before-counted-exit]",
+            "src/count.mojo:4: this `while True:` loop steps `k` and leaves on `k == n` after other work: Mojo 1.2.0 to 1.3.0.dev2026111805 (with `==`, 1.3.0.dev2026111105 to 2026111805) compile it as a loop tested at the top, at every optimization level, so the work before the test runs one time too few (fixed in 1.3.0.dev2026111905); test at the top (`while k <= n:`, or a `for` over a `range`), or do the first item before the loop and `while k != last:` [work-before-counted-exit]",
             "    src/count.mojo:5: seen[0] += k",
             "    src/count.mojo:6: if k == n:",
             "    src/count.mojo:8: k += 1",
@@ -819,11 +826,98 @@ fn a_while_true_loop_that_counts_to_its_exit_test_after_other_work() {
     );
     assert!(
         r.err.contains(
-            "0 `while True:` loops that append before their exit test, 1 `while True:` loop that counts to its exit test after other work"
+            "1 `while True:` loop that counts to its exit test after other work, append-before-loop-exit not checked: Mojo 1.3.0.dev2026111805 doesn't have its bug"
         ),
         "{}",
         r.err
     );
     assert_eq!(run_all(&d, &["-A", "work-before-counted-exit"]).code, 0);
     assert_eq!(run_all(&d, &["-W", "compiler-bugs"]).code, 0);
+}
+
+#[test]
+fn the_compiler_bugs_rules_check_for_the_projects_compiler() {
+    // `parse_keys` has both bugs' shapes: the one of 2026111905 and later,
+    // and the one of 1.2.0 to 2026111805.
+    let both = |pixi: Option<&str>| {
+        let mut files = vec![("src/key.mojo", KEYS)];
+        if let Some(p) = pixi {
+            files.push(("pixi.toml", p));
+        }
+        project(&files)
+    };
+    let rules = |r: &Run| {
+        (
+            r.out.contains("[append-before-loop-exit]"),
+            r.out.contains("[work-before-counted-exit]"),
+        )
+    };
+    // Pinned at 2026111805, in a feature as `mojo`: only the older bug.
+    let d = both(Some(
+        "[feature.dev.dependencies]\nmojo = \"=1.3.0.dev2026111805\"\n",
+    ));
+    let r = run_all(&d, &["-v"]);
+    assert_eq!(rules(&r), (false, true), "{}", r.out);
+    assert!(
+        r.err.contains("customs: Mojo 1.3.0.dev2026111805 (pixi.toml:2 [feature.dev.dependencies]), for the compiler-bugs rules"),
+        "{}",
+        r.err
+    );
+    assert!(
+        r.err.contains(
+            "append-before-loop-exit not checked: Mojo 1.3.0.dev2026111805 doesn't have its bug"
+        ),
+        "{}",
+        r.err
+    );
+    // At 2026111905: only #7716.
+    let d = both(Some(PIN_1905));
+    let r = run_all(&d, &[]);
+    assert_eq!(rules(&r), (true, false), "{}", r.out);
+    assert!(
+        r.err.contains(
+            "work-before-counted-exit not checked: Mojo 1.3.0.dev2026111905 doesn't have its bug"
+        ),
+        "{}",
+        r.err
+    );
+    // No pin, or a range: both.
+    for pixi in [None, Some("[dependencies]\nmojo = \">=1.2.0\"\n")] {
+        let d = both(pixi);
+        let r = run_all(&d, &["-v"]);
+        assert_eq!(rules(&r), (true, true), "{:?} {}", pixi, r.out);
+        assert!(
+            r.err.contains("customs: Mojo version unknown ("),
+            "{}",
+            r.err
+        );
+        assert!(!r.err.contains("not checked"), "{}", r.err);
+    }
+    // Stable and nightly pins: each bug of either.
+    let d = both(Some(
+        "[dependencies]\nmojo = \"==1.3.0.dev2026111905\"\n[feature.stable.dependencies]\nmojo = \"==1.2.0\"\n",
+    ));
+    assert_eq!(rules(&run_all(&d, &[])), (true, true));
+    // The command line, and `[tool.customs]`, over the pins.
+    let r = run_all(&d, &["--mojo-version", "1.3.0.dev2026112105", "-v"]);
+    assert_eq!(rules(&r), (true, false), "{}", r.out);
+    assert!(
+        r.err
+            .contains("customs: Mojo 1.3.0.dev2026112105 (--mojo-version)"),
+        "{}",
+        r.err
+    );
+    let r = run_all(&d, &["--mojo-version=1.2.0"]);
+    assert_eq!(rules(&r), (false, true), "{}", r.out);
+    assert_eq!(run_all(&d, &["--mojo-version", "latest"]).code, 2);
+    let d = both(Some(&format!(
+        "{PIN_1905}[tool.customs]\nmojo-version = \"1.3.0.dev2026111805\"\n"
+    )));
+    let r = run_all(&d, &["-v"]);
+    assert_eq!(rules(&r), (false, true), "{}", r.out);
+    assert!(
+        r.err.contains("(pixi.toml:4 [tool.customs] mojo-version)"),
+        "{}",
+        r.err
+    );
 }
