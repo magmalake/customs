@@ -49,9 +49,10 @@ pub enum Rule {
     MojoRunPerTest,
     MojoBuildPerTest,
     AppendBeforeLoopExit,
+    WorkBeforeCountedExit,
 }
 
-pub const RULES: [Rule; 7] = [
+pub const RULES: [Rule; 8] = [
     Rule::ImportCycle,
     Rule::ImportThroughReexport,
     Rule::UnusedImport,
@@ -59,6 +60,7 @@ pub const RULES: [Rule; 7] = [
     Rule::MojoRunPerTest,
     Rule::MojoBuildPerTest,
     Rule::AppendBeforeLoopExit,
+    Rule::WorkBeforeCountedExit,
 ];
 
 /// The groups, each with its rules; each is `deny` unless set.
@@ -81,7 +83,10 @@ pub const GROUPS: [(&str, &[Rule]); 3] = [
     ),
     // Each tied to a Mojo compiler bug (`crate::bugs::BUGS`), and deleted
     // when it's fixed.
-    ("compiler-bugs", &[Rule::AppendBeforeLoopExit]),
+    (
+        "compiler-bugs",
+        &[Rule::AppendBeforeLoopExit, Rule::WorkBeforeCountedExit],
+    ),
 ];
 
 impl Rule {
@@ -94,6 +99,7 @@ impl Rule {
             Rule::MojoRunPerTest => "mojo-run-per-test",
             Rule::MojoBuildPerTest => "mojo-build-per-test",
             Rule::AppendBeforeLoopExit => "append-before-loop-exit",
+            Rule::WorkBeforeCountedExit => "work-before-counted-exit",
         }
     }
 
@@ -312,6 +318,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.level(Rule::AppendBeforeLoopExit), Level::Allow);
+        assert_eq!(c.level(Rule::WorkBeforeCountedExit), Level::Warn);
     }
 
     #[test]

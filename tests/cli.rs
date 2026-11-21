@@ -722,7 +722,7 @@ fn a_while_true_loop_that_appends_before_its_exit_test() {
         ("src/p/key.mojo", KEYS),
         (
             "tests/test_k.mojo",
-            "def test_k():\n    var seen = List[Int]()\n    var i = 0\n    while True:  # noqa: compiler-bugs\n        seen.append(i)\n        if i == 3:\n            break\n        i += 1\n    while True:\n        grow(seen)\n        if i == 0:\n            break\n        i -= 1\n",
+            "def test_k():\n    var seen = List[Int]()\n    var i = 0\n    while True:  # noqa: compiler-bugs\n        seen.append(i)\n        if i == 3:\n            break\n        i += 1\n    while True:\n        grow(seen)\n        if i == 0:\n            break\n        i -= 2\n",
         ),
     ]);
     let r = run_all(&d, &[]);
@@ -789,4 +789,41 @@ fn github_annotation_of_a_compiler_bug() {
         out.contains("[append-before-loop-exit]%0Asrc/key.mojo:5: out.append(k.copy())%0Asrc/key.mojo:6: if k == last:"),
         "{out}"
     );
+}
+
+#[test]
+fn a_while_true_loop_that_counts_to_its_exit_test_after_other_work() {
+    let d = project(&[
+        (
+            "src/count.mojo",
+            "def total(n: Int) -> Int:\n    var seen = List[Int](length=1, fill=0)\n    var k = 1\n    while True:\n        seen[0] += k\n        if k == n:\n            break\n        k += 1\n    return seen[0]\n\n\ndef fixed(n: Int) -> Int:\n    var seen = 0\n    for k in range(1, n + 1):\n        seen += k\n    return seen\n",
+        ),
+        (
+            "tests/t.mojo",
+            "def main():\n    var s = String()\n    var i = 0\n    while True:  # noqa: work-before-counted-exit\n        s += \"x\"\n        if i > 3:\n            break\n        i += 1\n",
+        ),
+    ]);
+    let r = run_all(&d, &[]);
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    let lines: Vec<&str> = r.out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "src/count.mojo:4: this `while True:` loop steps `k` and leaves on `k == n` after other work: Mojo 1.2.0 to 1.3.0.dev2026111805 (with `==`, 1.3.0.dev2026111105 to 2026111805) compile it as a loop tested at the top, at every optimization level, so the work before the test runs one time too few (no upstream issue yet); test at the top (`while k <= n:`, or a `for` over a `range`), or do the first item before the loop and `while k != last:` [work-before-counted-exit]",
+            "    src/count.mojo:5: seen[0] += k",
+            "    src/count.mojo:6: if k == n:",
+            "    src/count.mojo:8: k += 1",
+        ],
+        "{}",
+        r.out
+    );
+    assert!(
+        r.err.contains(
+            "0 `while True:` loops that append before their exit test, 1 `while True:` loop that counts to its exit test after other work"
+        ),
+        "{}",
+        r.err
+    );
+    assert_eq!(run_all(&d, &["-A", "work-before-counted-exit"]).code, 0);
+    assert_eq!(run_all(&d, &["-W", "compiler-bugs"]).code, 0);
 }

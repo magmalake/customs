@@ -461,6 +461,11 @@ fn split_top(s: &str, sep: char) -> Vec<&str> {
     out
 }
 
+/// `s` cut at each `,` outside brackets.
+pub fn split_top_commas(s: &str) -> Vec<&str> {
+    split_top(s, ',')
+}
+
 /// Where a compound statement's header ends: its first `:` outside
 /// brackets (not a `:=`).
 fn header_colon(s: &str) -> Option<usize> {

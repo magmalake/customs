@@ -31,6 +31,9 @@ Checks the Mojo project at PROJECT (default: .). Its rules, by group:
   compiler-bugs
     append-before-loop-exit       no `while True:` loop that appends before
                                   its exit test (modular/modular#7716)
+    work-before-counted-exit      no `while True:` loop that steps an Int and
+                                  tests it after other work (Mojo 1.2.0 to
+                                  1.3.0.dev2026111805)
 
 Its modules are the .mojo files under PROJECT/src (or PROJECT, without a
 src); its other .mojo files (tests, examples, ...) are checked as importers.
@@ -219,6 +222,7 @@ fn main() -> ExitCode {
                 (f.findings, f.notes)
             }
             Rule::AppendBeforeLoopExit => bugs::append_before_loop_exit(&repo),
+            Rule::WorkBeforeCountedExit => bugs::work_before_counted_exit(&repo),
         };
         results.push((rule, found, notes));
     }
@@ -282,6 +286,11 @@ fn main() -> ExitCode {
                     n,
                     "`while True:` loop that appends before its exit test",
                     "`while True:` loops that append before their exit test",
+                ),
+                Rule::WorkBeforeCountedExit => plural(
+                    n,
+                    "`while True:` loop that counts to its exit test after other work",
+                    "`while True:` loops that count to their exit test after other work",
                 ),
             };
             if config.level(*rule) == Level::Warn && n > 0 {

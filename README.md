@@ -1,7 +1,7 @@
 # customs
 
 Checks a Mojo project's imports, how it builds its tests, and its code for
-shapes a known compiler bug miscompiles. Seven rules, in three groups. The
+shapes a known compiler bug miscompiles. Eight rules, in three groups. The
 full guide, with examples and how to fix each finding, is
 on [magmalake.org/s/customs](https://magmalake.org/s/customs).
 
@@ -95,10 +95,28 @@ issue is fixed. Since 0.5.0.
    ```
 
    A `print` in the loop happened to hide it in one program; that's no fix.
-   Nightlies 1.3.0.dev2026111105 to 2026111805 compile the same loop wrong
-   in another way, at every optimization level: its last iteration's append
-   is lost. See [How it reads loops](#how-it-reads-loops) for which loops
-   count.
+   See [How it reads loops](#how-it-reads-loops) for which loops count.
+8. **`work-before-counted-exit`: no `while True:` loop that counts to its
+   exit test after other work.** Mojo 1.2.0 to 1.3.0.dev2026111805 (with
+   `==`, 1.3.0.dev2026111105 to 2026111805) compile
+
+   ```mojo
+   while True:
+       seen[0] += 1
+       if k == n:
+           break
+       k += 1
+   ```
+
+   as a loop tested at the top, `for k in range(start, n)`, at every
+   optimization level, without checking that the test came first: what
+   comes before the test runs one time too few, and never when `k` starts
+   at `n`. A List or a String comes out one short, a store through an index
+   is lost. It needs a signed integer stepped by a constant (by 1 for `==`)
+   after the test, and an `==`, `<` or `>` test against a bound the loop
+   doesn't change. 1.3.0.dev2026111905 fixed it, and with it brought #7716.
+   Not filed upstream yet. Test at the top (`while k <= n:`, or a `for` over
+   a `range`), or do the first item before the loop and `while k != last:`.
 
 Every rule is `deny` unless [configured](#configuration).
 
@@ -114,7 +132,7 @@ every name in it; on a name's own line, that name. It works for
 `unused-import`, `import-through-reexport` and
 `functions-in-imported-module`, not for `import-cycle`: a cycle is fixed,
 or allowed for the whole project in the [configuration](#configuration).
-On a `while True:` line, it allows `append-before-loop-exit` for that loop.
+On a `while True:` line, it allows the `compiler-bugs` rules for that loop.
 flake8's codes (`F401`) aren't customs's names, and allow nothing.
 
 ```mojo
@@ -133,7 +151,7 @@ src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -
     src/morca/_internal/web/page.mojo:8: from morca._internal.ui.layout import with_header_help
 src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows [import-through-reexport]
 ...
-customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 106 unused imports, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files, 1 `while True:` loop that appends before its exit test
+customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 106 unused imports, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files, 1 `while True:` loop that appends before its exit test, 0 `while True:` loops that count to their exit test after other work
 ```
 
 ## Usage
@@ -179,7 +197,7 @@ mojo-build-per-test-threshold = 3   # report a command that builds more test fil
 [tool.customs.lints]
 imports = "deny"                    # group: import-cycle, import-through-reexport, unused-import
 tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test, mojo-build-per-test
-compiler-bugs = "deny"              # group: append-before-loop-exit
+compiler-bugs = "deny"              # group: append-before-loop-exit, work-before-counted-exit
 # The examples' tests are separate programs: they can't share a binary.
 mojo-run-per-test = "warn"          # a rule's own level wins over its group's
 ```
@@ -335,6 +353,31 @@ so is each call there that may grow a container: `push(out, k)`,
 `acc.add(k)`, `var n = r.read(buf)`. A function or method that appends
 miscompiles as `out.append` does, but customs doesn't know which ones
 append. An example in a docstring isn't read.
+
+`work-before-counted-exit` reads the same statements, for the shape the
+compiler turns into a counted loop. A `while True:` loop is reported when:
+
+- it has one `break` of its own and no `continue`;
+- the `break` ends the block of an `if C:` of the body with no `elif` and
+  no `else` but `pass`, or is the `else:` of `if C: pass`; `C` may be a
+  `var done = ...` made before it;
+- `C` is one `a == b`, `a < b` or `a > b` (`not (a != b)` is `==`), no
+  `and` or `or`;
+- one side is a name `k` declared before the loop or a parameter (or a
+  `var cur = k` made in the loop before the test), that the loop changes
+  only after the test, once, at its own level, with `k += c`, `k -= c` or
+  `k = k + c` (`c` a whole number, 1 for `==`); not declared `UInt...`,
+  nor made by a struct's constructor;
+- the other side is something the loop doesn't assign;
+- something comes before the test.
+
+It's silent when a number declared outside the loop (`var total = 0`, an
+`Int` parameter) changes before the test, as the compiler then leaves the
+loop as it is. It's a note with `-v` when the bound is a call (`len(q)`),
+when the loop makes a value with a destructor before the test (`var tmp =
+List[Int]()`), or when an `if` on the counter comes first: each kept a
+loop right in a test, and not always. A struct that holds a counter
+(`k = Day(k.n + 1)`) can be compiled wrong too; it isn't reported.
 
 ## Building
 
