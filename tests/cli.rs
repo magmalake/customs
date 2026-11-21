@@ -712,3 +712,81 @@ fn noqa_allows_a_reexport_but_not_a_cycle() {
         r.out
     );
 }
+
+const KEYS: &str = "def parse_keys(first: Day, last: Day) -> List[Day]:\n    var out = List[Day]()\n    var k = first.copy()\n    while True:\n        out.append(k.copy())\n        if k == last:\n            break\n        k = k.next()\n    return out^\n\n\ndef fixed(first: Day, last: Day) -> List[Day]:\n    var out = List[Day]()\n    var k = first.copy()\n    out.append(k.copy())\n    while k != last:\n        k = k.next()\n        out.append(k.copy())\n    return out^\n";
+
+#[test]
+fn a_while_true_loop_that_appends_before_its_exit_test() {
+    let d = project(&[
+        ("src/p/__init__.mojo", ""),
+        ("src/p/key.mojo", KEYS),
+        (
+            "tests/test_k.mojo",
+            "def test_k():\n    var seen = List[Int]()\n    var i = 0\n    while True:  # noqa: compiler-bugs\n        seen.append(i)\n        if i == 3:\n            break\n        i += 1\n    while True:\n        grow(seen)\n        if i == 0:\n            break\n        i -= 1\n",
+        ),
+    ]);
+    let r = run_all(&d, &[]);
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    let lines: Vec<&str> = r.out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "src/p/key.mojo:4: this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 and later miscompile it at the default optimization level, losing or shifting elements and writing freed memory (https://github.com/modular/modular/issues/7716); append the first one before the loop and test at the top (`while k != last:`), or loop with `for` [append-before-loop-exit]",
+            "    src/p/key.mojo:5: out.append(k.copy())",
+            "    src/p/key.mojo:6: if k == last:",
+        ],
+        "{}",
+        r.out
+    );
+    assert!(
+        r.err.contains(
+            "0 commands that run `mojo build` on more than 3 files, 1 `while True:` loop that appends before its exit test"
+        ),
+        "{}",
+        r.err
+    );
+    // A call that may grow a container is a note, with -v.
+    let r = run_all(&d, &["-v"]);
+    assert!(
+        r.out.contains("tests/test_k.mojo:10: note: append-before-loop-exit: can't tell whether `grow(...)` grows a container before the exit test of the `while True:` loop on line 9"),
+        "{}",
+        r.out
+    );
+    assert_eq!(run_all(&d, &["-v"]).code, 1);
+    // Its level, as any rule's: by name or by group.
+    assert_eq!(run_all(&d, &["-A", "append-before-loop-exit"]).code, 0);
+    let r = run_all(&d, &["-W", "compiler-bugs"]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.out
+            .starts_with("src/p/key.mojo:4: warning: this `while True:` loop"),
+        "{}",
+        r.out
+    );
+    assert!(r.err.contains("before its exit test (warn)"), "{}", r.err);
+    fs::write(
+        d.join("pixi.toml"),
+        "[tool.customs.lints]\ncompiler-bugs = \"allow\"\n",
+    )
+    .unwrap();
+    let r = run_all(&d, &[]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(!r.err.contains("while True"), "{}", r.err);
+}
+
+#[test]
+fn github_annotation_of_a_compiler_bug() {
+    let d = project(&[("src/key.mojo", KEYS)]);
+    let o = Command::new(env!("CARGO_BIN_EXE_customs"))
+        .arg(&d)
+        .current_dir(&d)
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("::error file=src/key.mojo,line=4,title=customs::this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 and later"), "{out}");
+    assert!(
+        out.contains("[append-before-loop-exit]%0Asrc/key.mojo:5: out.append(k.copy())%0Asrc/key.mojo:6: if k == last:"),
+        "{out}"
+    );
+}

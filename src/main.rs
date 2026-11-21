@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use customs::bugs;
 use customs::check::{self, Finding};
 use customs::config::{Config, Level, Rule, RULES};
 use customs::repo::{self, Repo};
@@ -27,13 +28,17 @@ Checks the Mojo project at PROJECT (default: .). Its rules, by group:
                                   `mojo run` on more than 3 test files
     mojo-build-per-test           no task, CI step or script that runs
                                   `mojo build` on more than 3 test files
+  compiler-bugs
+    append-before-loop-exit       no `while True:` loop that appends before
+                                  its exit test (modular/modular#7716)
 
 Its modules are the .mojo files under PROJECT/src (or PROJECT, without a
 src); its other .mojo files (tests, examples, ...) are checked as importers.
 Levels and options are read from the [tool.customs] table of
 PROJECT/pixi.toml; every rule is `deny` unless set there or here. A
-`# noqa` comment on an import's line allows every rule on it but
-import-cycle; `# noqa: NAME, ...` only the rules or groups named.
+`# noqa` comment on an import's line, or a `while True:` line, allows every
+rule on it but import-cycle; `# noqa: NAME, ...` only the rules or groups
+named.
 
   -I DIR         modules of another project, as `mojo build -I DIR`: names
                  imported from them are checked, they aren't
@@ -41,7 +46,8 @@ import-cycle; `# noqa: NAME, ...` only the rules or groups named.
   -W NAME        warn: report it, but don't fail
   -D NAME        deny: report it and fail
   -v, --verbose  also note what it can't place: names not found in the module
-                 they're imported from, `mojo run`s whose files it can't tell
+                 they're imported from, `mojo run`s whose files it can't tell,
+                 calls that may grow a container before a loop's exit test
   -h, --help     this
   -V, --version  the version
 
@@ -212,6 +218,7 @@ fn main() -> ExitCode {
                 let f = build_found.take().expect("scanned");
                 (f.findings, f.notes)
             }
+            Rule::AppendBeforeLoopExit => bugs::append_before_loop_exit(&repo),
         };
         results.push((rule, found, notes));
     }
@@ -270,6 +277,11 @@ fn main() -> ExitCode {
                         "commands that run `mojo build` on"
                     ),
                     config.build_threshold
+                ),
+                Rule::AppendBeforeLoopExit => plural(
+                    n,
+                    "`while True:` loop that appends before its exit test",
+                    "`while True:` loops that append before their exit test",
                 ),
             };
             if config.level(*rule) == Level::Warn && n > 0 {

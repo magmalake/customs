@@ -11,6 +11,7 @@
 //! [tool.customs.lints]
 //! imports = "deny"                 # import-cycle, import-through-reexport, unused-import
 //! tests = "deny"
+//! compiler-bugs = "deny"
 //! mojo-run-per-test = "warn"
 //! ```
 
@@ -47,19 +48,21 @@ pub enum Rule {
     FunctionsInImportedModule,
     MojoRunPerTest,
     MojoBuildPerTest,
+    AppendBeforeLoopExit,
 }
 
-pub const RULES: [Rule; 6] = [
+pub const RULES: [Rule; 7] = [
     Rule::ImportCycle,
     Rule::ImportThroughReexport,
     Rule::UnusedImport,
     Rule::FunctionsInImportedModule,
     Rule::MojoRunPerTest,
     Rule::MojoBuildPerTest,
+    Rule::AppendBeforeLoopExit,
 ];
 
-/// The groups, each with its rules; both are `deny` unless set.
-pub const GROUPS: [(&str, &[Rule]); 2] = [
+/// The groups, each with its rules; each is `deny` unless set.
+pub const GROUPS: [(&str, &[Rule]); 3] = [
     (
         "imports",
         &[
@@ -76,6 +79,9 @@ pub const GROUPS: [(&str, &[Rule]); 2] = [
             Rule::MojoBuildPerTest,
         ],
     ),
+    // Each tied to a Mojo compiler bug (`crate::bugs::BUGS`), and deleted
+    // when it's fixed.
+    ("compiler-bugs", &[Rule::AppendBeforeLoopExit]),
 ];
 
 impl Rule {
@@ -87,6 +93,7 @@ impl Rule {
             Rule::FunctionsInImportedModule => "functions-in-imported-module",
             Rule::MojoRunPerTest => "mojo-run-per-test",
             Rule::MojoBuildPerTest => "mojo-build-per-test",
+            Rule::AppendBeforeLoopExit => "append-before-loop-exit",
         }
     }
 
@@ -292,6 +299,19 @@ mod tests {
             .unwrap();
         assert_eq!(c.level(Rule::ImportThroughReexport), Level::Warn);
         assert_eq!(c.level(Rule::MojoRunPerTest), Level::Allow);
+    }
+
+    #[test]
+    fn the_compiler_bugs_group() {
+        let c = with("[tool.customs.lints]\ncompiler-bugs = \"warn\"\n").unwrap();
+        assert_eq!(Rule::AppendBeforeLoopExit.group(), "compiler-bugs");
+        assert_eq!(c.level(Rule::AppendBeforeLoopExit), Level::Warn);
+        assert_eq!(c.level(Rule::UnusedImport), Level::Deny);
+        let c = with(
+            "[tool.customs.lints]\ncompiler-bugs = \"warn\"\nappend-before-loop-exit = \"allow\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.level(Rule::AppendBeforeLoopExit), Level::Allow);
     }
 
     #[test]

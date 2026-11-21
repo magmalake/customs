@@ -37,11 +37,18 @@ pub struct File {
     pub defs: HashSet<String>,
     /// The file through [`lex::strip`].
     pub text: String,
+    /// The file as read, to quote its lines.
+    pub source: String,
     /// The `# noqa` comments, by line.
     pub noqa: HashMap<usize, Noqa>,
 }
 
 impl File {
+    /// Line `line` (1-based) as written, trimmed.
+    pub fn quote(&self, line: usize) -> &str {
+        self.source.lines().nth(line - 1).unwrap_or("").trim()
+    }
+
     /// Whether a `# noqa` on any of `lines` allows `rule` (in `group`).
     pub fn noqa(&self, lines: &[usize], rule: &str, group: &str) -> bool {
         lines
@@ -141,6 +148,7 @@ fn read(path: &Path, module: Option<(String, bool)>, local: bool) -> io::Result<
         imports: lex::imports(&text),
         defs: lex::defs(&text),
         text,
+        source: src,
         noqa,
     })
 }

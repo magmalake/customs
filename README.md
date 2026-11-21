@@ -1,7 +1,8 @@
 # customs
 
-Checks a Mojo project's imports, and how it builds its tests. Six rules, in
-two groups. The full guide, with examples and how to fix each finding, is
+Checks a Mojo project's imports, how it builds its tests, and its code for
+shapes a known compiler bug miscompiles. Seven rules, in three groups. The
+full guide, with examples and how to fix each finding, is
 on [magmalake.org/s/customs](https://magmalake.org/s/customs).
 
 **`imports`**
@@ -60,6 +61,45 @@ on [magmalake.org/s/customs](https://magmalake.org/s/customs).
    Building several programs (pipelines, a CLI, a test's driver) isn't a
    finding: only test files count. Since 0.3.1.
 
+**`compiler-bugs`**
+
+Code that a known Mojo compiler bug compiles wrong. Each rule names its
+upstream issue and the versions it's in, in its findings, and goes when the
+issue is fixed. Since 0.5.0.
+
+7. **`append-before-loop-exit`: no `while True:` loop that appends before
+   its exit test.** Mojo 1.3.0.dev2026111905 and later, at the default
+   optimization level, miscompile
+
+   ```mojo
+   while True:
+       out.append(k.copy())
+       if k == last:
+           break
+       k = k.next()
+   ```
+
+   ([modular/modular#7716](https://github.com/modular/modular/issues/7716)).
+   The compiler copies what comes before the exit test to the end of the
+   loop with the operands of the iteration before, so the append stores
+   through the List's buffer and length from before it grew: elements are
+   lost or shifted and freed memory is written, and the program can print a
+   wrong result and exit 0. The finding names the append and the test. Do
+   the first step before the loop and test at the top, or loop with `for`:
+
+   ```mojo
+   out.append(k.copy())
+   while k != last:
+       k = k.next()
+       out.append(k.copy())
+   ```
+
+   A `print` in the loop happened to hide it in one program; that's no fix.
+   Nightlies 1.3.0.dev2026111105 to 2026111805 compile the same loop wrong
+   in another way, at every optimization level: its last iteration's append
+   is lost. See [How it reads loops](#how-it-reads-loops) for which loops
+   count.
+
 Every rule is `deny` unless [configured](#configuration).
 
 ## `# noqa`
@@ -74,6 +114,7 @@ every name in it; on a name's own line, that name. It works for
 `unused-import`, `import-through-reexport` and
 `functions-in-imported-module`, not for `import-cycle`: a cycle is fixed,
 or allowed for the whole project in the [configuration](#configuration).
+On a `while True:` line, it allows `append-before-loop-exit` for that loop.
 flake8's codes (`F401`) aren't customs's names, and allow nothing.
 
 ```mojo
@@ -92,7 +133,7 @@ src/morca/_internal/ui/layout.mojo:16: import cycle: morca._internal.ui.layout -
     src/morca/_internal/web/page.mojo:8: from morca._internal.ui.layout import with_header_help
 src/morca/_internal/usage.mojo:46: from morca._internal.store import Usage: `Usage` is defined in morca._internal.db.run_rows, and morca._internal.store only re-exports it; import it from morca._internal.db.run_rows [import-through-reexport]
 ...
-customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 106 unused imports, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files
+customs: 259 modules, 384 files: 3 import cycles, 146 imports through a re-export, 106 unused imports, 0 imports of a file that calls __functions_in_module(), 0 commands that run `mojo run` on more than 3 files, 0 commands that run `mojo build` on more than 3 files, 1 `while True:` loop that appends before its exit test
 ```
 
 ## Usage
@@ -114,8 +155,10 @@ customs [-I DIR]... [-A|-W|-D NAME]... [-v] [PROJECT]
   rule or a group, over the configuration file.
 - **`-v`**: also notes what it can't place: each name that isn't found at
   the top level of the module it's imported from (a definition inside a
-  `comptime if`, or a local variable that shadows a module's name), and
-  each `mojo run` whose files it can't tell. Notes don't fail the run.
+  `comptime if`, or a local variable that shadows a module's name), each
+  `mojo run` whose files it can't tell, and each call before a `while
+  True:` loop's exit test that may grow a container. Notes don't fail the
+  run.
 
 Each finding ends with its rule's name. It exits 1 when a `deny` rule finds
 anything (a `warn` rule's findings are printed as `warning:` and don't
@@ -136,12 +179,13 @@ mojo-build-per-test-threshold = 3   # report a command that builds more test fil
 [tool.customs.lints]
 imports = "deny"                    # group: import-cycle, import-through-reexport, unused-import
 tests = "deny"                      # group: functions-in-imported-module, mojo-run-per-test, mojo-build-per-test
+compiler-bugs = "deny"              # group: append-before-loop-exit
 # The examples' tests are separate programs: they can't share a binary.
 mojo-run-per-test = "warn"          # a rule's own level wins over its group's
 ```
 
 - Levels: `deny` reports and fails, `warn` reports and passes, `allow`
-  doesn't check. Both groups are `deny` by default.
+  doesn't check. Every group is `deny` by default.
 - A rule's own level wins over its group's, in the file and on the command
   line; the command line (`-A`, `-W`, `-D`) wins over the file.
 - `lints` may also be an inline table (`lints = { tests = "warn" }`) or
@@ -156,7 +200,7 @@ mojo-run-per-test = "warn"          # a rule's own level wins over its group's
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.4.0
+      - uses: magmalake/customs@v0.5.0
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -176,7 +220,7 @@ on each pull request, as a job their one required check waits for, as in
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.4.0
+      - uses: magmalake/customs@v0.5.0
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]
@@ -258,6 +302,39 @@ scripts named by a variable, a script's own arguments (only a function's),
 a task's `cwd`, nor `pyproject.toml`'s `[tool.pixi]`.
 `echo` and `printf` lines are skipped, so a `mojo run` in a message isn't
 counted.
+
+## How it reads loops
+
+`append-before-loop-exit` reads statements, still a scanner: after the
+blanking, a line that an open bracket or a `\` continues is read with the
+lines it takes, `;` cuts statements, and each `if`, `for`, `while`, `def`
+... has the block indented under it (or what follows its `:` on the line).
+In each `while True:` (or `while 1:`) loop, at any depth, it finds the first
+statement of the body that can leave the loop or end the iteration: one
+that holds a `break` of this loop (not of a loop inside it), a `return`, a
+`raise` or a `continue`. When that's an `if` (with its `elif`s and `else`)
+that holds a `break`, an `X.append(...)` before it in the body, on a name
+the body doesn't declare with `var` (`out`, `self.items`), is a finding.
+
+The compiler decided the rest: each shape was built with 1.3.0.dev2026111905,
+2026112017 and 2026112105 at the default optimization level, and run. It
+miscompiles an append of an `Int` or of a struct; to a `mut` argument or to
+`self.items` in a method; in a `while True:` inside a `for`; with `while 1:`,
+with the `break` in the `else`, and with the test at the loop's end. It
+doesn't with the test at the top, a `for` with `break`, or the test first;
+nor for a `Dict` or `Set` insert, `String +=` or `.write`, `List +=`,
+`extend`, `insert` or an item assignment; nor for an append inside an `if`
+or an inner `for`, or before a `return`, `raise` or `continue` that comes
+first. Whether it does also depends on how much the loop does before the
+test (a second append, or a `List[String]`, hid it), which a scanner can't
+measure: every such append is reported.
+
+Where it can't tell, it doesn't report. With `-v`, an append inside a block
+before the test, or before a `return`, `raise` or `continue`, is a note, and
+so is each call there that may grow a container: `push(out, k)`,
+`acc.add(k)`, `var n = r.read(buf)`. A function or method that appends
+miscompiles as `out.append` does, but customs doesn't know which ones
+append. An example in a docstring isn't read.
 
 ## Building
 
