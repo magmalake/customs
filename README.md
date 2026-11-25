@@ -70,8 +70,8 @@ it, in its findings; it runs only for a compiler that has the bug (see
 Since 0.5.0.
 
 7. **`append-before-loop-exit`: no `while True:` loop that appends before
-   its exit test.** Mojo 1.3.0.dev2026111905 and later, at the default
-   optimization level, miscompile
+   its exit test.** Mojo 1.3.0.dev2026111905 to 1.3.0.dev2026112105, at the
+   default optimization level, miscompile
 
    ```mojo
    while True:
@@ -81,7 +81,10 @@ Since 0.5.0.
        k = k.next()
    ```
 
-   ([modular/modular#7716](https://github.com/modular/modular/issues/7716)).
+   ([modular/modular#7716](https://github.com/modular/modular/issues/7716);
+   fixed by [modular/modular#7725](https://github.com/modular/modular/pull/7725)
+   in 1.3.0.dev2026112316, so the rule runs only for a pin in that range,
+   since 0.5.1).
    The compiler copies what comes before the exit test to the end of the
    loop with the operands of the iteration before, so the append stores
    through the List's buffer and length from before it grew: elements are
@@ -247,7 +250,7 @@ mojo-run-per-test = "warn"          # a rule's own level wins over its group's
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.5.0
+      - uses: magmalake/customs@v0.5.1
 ```
 
 The action downloads the release of its own tag (or `version:`, or the
@@ -267,7 +270,7 @@ on each pull request, as a job their one required check waits for, as in
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.5.0
+      - uses: magmalake/customs@v0.5.1
 
   ci:
     needs: [release, release-check, test, lint-bench, customs]

@@ -237,6 +237,8 @@ mod tests {
             "1.3.0.dev2026111805",
             "1.3.0.dev2026111905",
             "1.3.0.dev2026112105",
+            "1.3.0.dev2026112316",
+            "1.3.0.dev2026112505",
             "1.3.0",
             "1.3.1.dev2026120105",
             "1.10",
@@ -254,16 +256,20 @@ mod tests {
     fn ranges() {
         // work-before-counted-exit: 1.2.0 to the last before 2026111905.
         let old = |s: &str| within(&v(s), "1.2.0", Some("1.3.0.dev2026111905"));
-        // append-before-loop-exit: from 2026111905, not fixed yet.
-        let new = |s: &str| within(&v(s), "1.3.0.dev2026111905", None);
+        // append-before-loop-exit: 2026111905 to the last before 2026112316.
+        let new = |s: &str| within(&v(s), "1.3.0.dev2026111905", Some("1.3.0.dev2026112316"));
         for (s, o, n) in [
             ("1.2.0", true, false),
             ("1.3.0.dev2026111005", true, false),
             ("1.3.0.dev2026111105", true, false),
             ("1.3.0.dev2026111805", true, false),
             ("1.3.0.dev2026111905", false, true),
+            ("1.3.0.dev2026112017", false, true),
             ("1.3.0.dev2026112105", false, true),
-            ("1.3.0", false, true),
+            ("1.3.0.dev2026112316", false, false),
+            ("1.3.0.dev2026112405", false, false),
+            ("1.3.0.dev2026112505", false, false),
+            ("1.3.0", false, false),
             ("1.1.0", false, false),
         ] {
             assert_eq!((old(s), new(s)), (o, n), "{s}");

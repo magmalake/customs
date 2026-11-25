@@ -734,7 +734,7 @@ fn a_while_true_loop_that_appends_before_its_exit_test() {
     assert_eq!(
         lines,
         vec![
-            "src/p/key.mojo:4: this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 and later miscompile it at the default optimization level, losing or shifting elements and writing freed memory (https://github.com/modular/modular/issues/7716); append the first one before the loop and test at the top (`while k != last:`), or loop with `for` [append-before-loop-exit]",
+            "src/p/key.mojo:4: this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 to 1.3.0.dev2026112105 miscompile it at the default optimization level, losing or shifting elements and writing freed memory (https://github.com/modular/modular/issues/7716); append the first one before the loop and test at the top (`while k != last:`), or loop with `for` [append-before-loop-exit]",
             "    src/p/key.mojo:5: out.append(k.copy())",
             "    src/p/key.mojo:6: if k == last:",
         ],
@@ -787,7 +787,7 @@ fn github_annotation_of_a_compiler_bug() {
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
-    assert!(out.contains("::error file=src/key.mojo,line=4,title=customs::this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 and later"), "{out}");
+    assert!(out.contains("::error file=src/key.mojo,line=4,title=customs::this `while True:` loop appends to `out` before its exit test: Mojo 1.3.0.dev2026111905 to 1.3.0.dev2026112105"), "{out}");
     assert!(
         out.contains("[append-before-loop-exit]%0Asrc/key.mojo:5: out.append(k.copy())%0Asrc/key.mojo:6: if k == last:"),
         "{out}"
@@ -837,7 +837,7 @@ fn a_while_true_loop_that_counts_to_its_exit_test_after_other_work() {
 
 #[test]
 fn the_compiler_bugs_rules_check_for_the_projects_compiler() {
-    // `parse_keys` has both bugs' shapes: the one of 2026111905 and later,
+    // `parse_keys` has both bugs' shapes: the one of 2026111905 to 2026112105,
     // and the one of 1.2.0 to 2026111805.
     let both = |pixi: Option<&str>| {
         let mut files = vec![("src/key.mojo", KEYS)];
@@ -881,6 +881,23 @@ fn the_compiler_bugs_rules_check_for_the_projects_compiler() {
         "{}",
         r.err
     );
+    // At 2026112105, the last nightly before the fix: still #7716.
+    let d = both(Some("[dependencies]\nmojo = \"==1.3.0.dev2026112105\"\n"));
+    let r = run_all(&d, &[]);
+    assert_eq!(rules(&r), (true, false), "{}", r.out);
+    // From 2026112316 (modular/modular#7725): neither.
+    for v in ["1.3.0.dev2026112316", "1.3.0.dev2026112505"] {
+        let d = both(Some(&format!("[dependencies]\nmojo = \"=={v}\"\n")));
+        let r = run_all(&d, &[]);
+        assert_eq!(rules(&r), (false, false), "{v} {}", r.out);
+        assert!(
+            r.err.contains(&format!(
+                "append-before-loop-exit and work-before-counted-exit not checked: Mojo {v} doesn't have their bugs"
+            )),
+            "{}",
+            r.err
+        );
+    }
     // No pin, or a range: both.
     for pixi in [None, Some("[dependencies]\nmojo = \">=1.2.0\"\n")] {
         let d = both(pixi);
