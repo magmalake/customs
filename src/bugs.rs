@@ -1,16 +1,18 @@
 //! The rules on compiler bugs: source shapes that a known Mojo compiler
 //! bug turns into wrong code. Each is tied to an upstream issue, names the
-//! versions it affects (in [`BUGS`], printed in its findings), and is to be
-//! deleted when the issue is fixed.
+//! versions it affects (in [`BUGS`], printed in its findings). A rule stays
+//! once its bug is fixed, with the version that fixed it, for a project that
+//! still pins an affected compiler, and goes when no one builds with one.
 //!
 //! 1. **`append-before-loop-exit`: no `while True:` loop that appends
-//!    before its exit test.** Mojo 1.3.0.dev2026111905 and later, at the
-//!    default optimization level, copy the statements ahead of such a
+//!    before its exit test.** Mojo 1.3.0.dev2026111905 to
+//!    1.3.0.dev2026112105, at the default optimization level, copy the statements ahead of such a
 //!    loop's exit test to the loop's end with the operands of the
 //!    iteration before: the append stores through the List's buffer and
 //!    length from before it grew, so elements are lost or shifted and
 //!    freed memory is written
 //!    ([modular/modular#7716](https://github.com/modular/modular/issues/7716)).
+//!    Fixed in 1.3.0.dev2026112316, by modular/modular#7725.
 //!
 //! 2. **`work-before-counted-exit`: no `while True:` loop that counts to
 //!    its exit test after other work.** Mojo 1.2.0 to 1.3.0.dev2026111805
@@ -51,10 +53,10 @@ pub const BUGS: [Bug; 2] = [
         rule: Rule::AppendBeforeLoopExit,
         issue: Some("https://github.com/modular/modular/issues/7716"),
         from: "1.3.0.dev2026111905",
-        // Not fixed yet (the fix is modular/modular#7725): once a build has
-        // it, `Some("<that version>")`, and `versions` to match.
-        fixed_in: None,
-        versions: "1.3.0.dev2026111905 and later",
+        // Fixed by modular/modular#7725: wrong on 2026112105 (the last
+        // nightly before it), right on 2026112316, 2026112405 and 2026112505.
+        fixed_in: Some("1.3.0.dev2026112316"),
+        versions: "1.3.0.dev2026111905 to 1.3.0.dev2026112105",
     },
     Bug {
         rule: Rule::WorkBeforeCountedExit,
